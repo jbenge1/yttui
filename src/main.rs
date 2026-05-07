@@ -85,6 +85,17 @@ fn run(terminal: &mut Term, cli: &Cli) -> io::Result<()> {
         if let Some(p) = &pending_search {
             match p.rx.try_recv() {
                 Ok((seq, outcome)) => {
+                    // The `seq != current_seq()` arm is currently
+                    // unreachable in production: `pending_search` is
+                    // overwritten by every new dispatch and nulled by
+                    // every cancel, so any outcome we read here was
+                    // produced by the dispatch that set
+                    // `current_seq()`. The guard is kept defensively in
+                    // case a future refactor introduces a second
+                    // dispatch path or detaches `pending_search` from
+                    // the seq counter — see
+                    // `dispatcher::tests::stale_result_is_identifiable_via_seq_compare`
+                    // which simulates that scenario explicitly.
                     if seq == dispatcher.current_seq() {
                         // Note: `SearchError::Cancelled` is unreachable
                         // here in practice — `Action::CancelSearch` drops
