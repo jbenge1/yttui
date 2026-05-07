@@ -88,6 +88,45 @@ impl ChildRegistry {
         *self.inner.lock().expect("ChildRegistry mutex poisoned")
     }
 
+    /// Register a pid and return a [`RegistrationGuard`] that clears
+    /// the registry on drop. Use this instead of [`Self::register`] +
+    /// manual [`Self::clear`] to ensure the clear happens on every
+    /// exit path of the surrounding scope (#71). The residual window
+    /// between an upstream `wait()` returning and Drop running is
+    /// bounded to the stack-unwind of the enclosing function — pidfd
+    /// would close it entirely, but isn't portable.
+    pub fn register_pid_with_guard(&self, pid: u32) -> RegistrationGuard<'_> {
+        self.register(pid);
+        RegistrationGuard { registry: self }
+    }
+
+    /// Spawn-and-register inside a single critical section so a
+    /// concurrent signal-watcher cannot observe a transient `None`
+    /// while the child is alive (#70). The registry mutex is held for
+    /// the entire duration of `spawn`, then the returned pid is
+    /// written before the lock is dropped. Returns the spawn closure's
+    /// non-pid output (typically the child handle) plus a
+    /// [`RegistrationGuard`] that clears on drop.
+    ///
+    /// # Errors
+    /// Propagates whatever error type `spawn` returns.
+    ///
+    /// # Panics
+    /// Panics if the inner mutex was poisoned. See [`Self::register`].
+    pub fn register_spawn<C, E, F>(
+        &self,
+        spawn: F,
+    ) -> Result<(C, RegistrationGuard<'_>), E>
+    where
+        F: FnOnce() -> Result<(C, u32), E>,
+    {
+        let mut g = self.inner.lock().expect("ChildRegistry mutex poisoned");
+        let (child, pid) = spawn()?;
+        *g = Some(pid);
+        drop(g);
+        Ok((child, RegistrationGuard { registry: self }))
+    }
+
     /// Send `SIGTERM` to the registered process group, if any. Used by
     /// the signal watcher; safe to call from any thread. Errors are
     /// swallowed — we're already on the way out and there's nothing
@@ -97,26 +136,39 @@ impl ChildRegistry {
         let Some(pid) = self.current() else {
             return;
         };
-        // `killpg` would be more idiomatic but isn't in libstd; sending
-        // to `-pid` does the same job (POSIX kill(2): negative pid
-        // targets the process group whose leader has |pid|).
+        // `killpg` is `safe fn` in `nix`, no fork+exec, no /bin/kill
+        // dependency, no PATH lookup. Project lints `unsafe_code =
+        // forbid` so the syscall stays behind nix's safe wrapper.
         let pid_i = i32::try_from(pid).unwrap_or(i32::MAX);
-        // Use std's libc-free path: spawn `kill -TERM -<pid>`. Avoids
-        // pulling in `nix` directly and stays inside the project's
-        // `unsafe_code = forbid` boundary.
-        let _ = std::process::Command::new("kill")
-            .arg("-TERM")
-            .arg(format!("-{pid_i}"))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pid_i),
+            nix::sys::signal::Signal::SIGTERM,
+        );
     }
 
     #[cfg(not(unix))]
     pub fn kill_group(&self) {
         // Non-Unix: process groups don't exist the same way; the bin
         // itself isn't supported on non-Unix targets at the moment.
+    }
+}
+
+/// RAII guard that clears the registry when dropped.
+///
+/// Returned by [`ChildRegistry::register_pid_with_guard`] and
+/// [`ChildRegistry::register_spawn`]. Drop runs on every code path
+/// (early-return via `?`, panic, normal fallthrough) so the pid is
+/// always deregistered. Closes the worst of the reap-vs-clear race
+/// (#71); the residual window between `wait()` returning and Drop is
+/// bounded to a handful of stack-unwind instructions.
+#[derive(Debug)]
+pub struct RegistrationGuard<'a> {
+    registry: &'a ChildRegistry,
+}
+
+impl Drop for RegistrationGuard<'_> {
+    fn drop(&mut self) {
+        self.registry.clear();
     }
 }
 
@@ -196,6 +248,174 @@ mod tests {
         // path and confirm it returns cleanly.
         let r = ChildRegistry::new();
         r.kill_group();
+        assert_eq!(r.current(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kill_group_terminates_a_real_child_process_group() {
+        // Pin #76: kill_group must actually deliver SIGTERM to the
+        // registered process group. Spawn a sleep in its own group,
+        // register its pgid, kill_group, then assert wait() returns
+        // signal-15 termination. Independent of whether the impl uses
+        // /bin/kill or nix::killpg — the contract is "child dies".
+        use command_group::CommandGroup;
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::Command;
+
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .group_spawn()
+            .expect("spawn sleep");
+        let r = ChildRegistry::new();
+        r.register(child.id());
+        r.kill_group();
+        let status = child.wait().expect("wait sleep");
+        assert_eq!(
+            status.signal(),
+            Some(libc_sigterm()),
+            "expected SIGTERM termination, got {status:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn libc_sigterm() -> i32 {
+        // Avoid pulling libc in just for the constant; SIGTERM is 15
+        // on every Unix yttui targets.
+        15
+    }
+
+    #[test]
+    fn register_spawn_blocks_concurrent_observers_until_pid_is_set() {
+        // Pin #70: the spawn-vs-register race. Without this fix, a
+        // SIGINT arriving between `Command::spawn()` returning and the
+        // registry getting updated would observe `None` and the
+        // watcher would skip kill_group, orphaning the child. With
+        // `register_spawn`, the registry mutex is held for the entire
+        // spawn-and-register critical section, so any concurrent
+        // observer of `current()` either sees `None` (spawn hasn't
+        // started yet) or `Some(pid)` (spawn done + registered) — never
+        // a transient `None` while the child is alive.
+        //
+        // Deterministic test: a barrier-fenced "spawn" lets us pin the
+        // helper inside the lock window, fire an observer thread that
+        // contends for the lock, then release the spawn. The observer
+        // must NOT see `None` once the spawn function has been called
+        // with a non-zero pid.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        let r: &'static ChildRegistry = Box::leak(Box::new(ChildRegistry::new()));
+        let spawn_started = Arc::new(AtomicBool::new(false));
+        let release_spawn = Arc::new(AtomicBool::new(false));
+
+        let spawn_started_t = spawn_started.clone();
+        let release_spawn_t = release_spawn.clone();
+        // Channel passes the guard out so the producer thread keeps
+        // it alive while the observer reads the registry. Without this
+        // the guard's Drop would clear the pid the moment the
+        // register_spawn return value is bound to `_`.
+        let (guard_tx, guard_rx) = std::sync::mpsc::channel();
+        let producer = std::thread::spawn(move || {
+            let ((), guard) = r
+                .register_spawn::<(), (), _>(|| {
+                    spawn_started_t.store(true, Ordering::SeqCst);
+                    while !release_spawn_t.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Ok(((), 424_242))
+                })
+                .expect("register_spawn ok");
+            guard_tx.send(()).unwrap();
+            // Hold the guard until the observer has read.
+            std::thread::sleep(Duration::from_millis(100));
+            drop(guard);
+        });
+
+        // Wait for producer to be inside the spawn closure (lock held).
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !spawn_started.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "producer never entered spawn");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        // Concurrent observer: must block on the registry mutex until
+        // producer releases. Thread it so we can confirm it didn't
+        // return `None` mid-window.
+        let observer_pid = Arc::new(std::sync::Mutex::new(None));
+        let observer_pid_t = observer_pid.clone();
+        let observer = std::thread::spawn(move || {
+            let pid = r.current();
+            *observer_pid_t.lock().unwrap() = Some(pid);
+        });
+
+        // Give the observer time to attempt to lock — it must be
+        // blocked since producer holds the lock.
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(
+            observer_pid.lock().unwrap().is_none(),
+            "observer should be blocked on the registry lock; it returned early"
+        );
+
+        // Release the spawn → producer writes pid → drops lock →
+        // observer acquires → reads Some(pid).
+        release_spawn.store(true, Ordering::SeqCst);
+        // Wait for producer to confirm it acquired the guard (i.e.
+        // pid is registered) before joining the observer.
+        guard_rx.recv().unwrap();
+        observer.join().unwrap();
+
+        let seen_by_observer = observer_pid
+            .lock()
+            .unwrap()
+            .expect("observer thread must have run");
+        assert_eq!(
+            seen_by_observer,
+            Some(424_242),
+            "observer must see the registered pid, never the transient None"
+        );
+
+        producer.join().unwrap();
+
+        // Cleanup so the static doesn't pollute later tests.
+        r.clear();
+    }
+
+    #[test]
+    fn registration_guard_clears_registry_on_drop() {
+        // Pin #71: the reap-vs-clear pid-recycle race. The guard
+        // pattern ensures the registry is cleared as part of unwinding
+        // the spawn helper's stack frame, rather than as a separate
+        // statement at the call site (where ordering can drift). The
+        // residual window between `child.wait()` returning and the
+        // guard's Drop running is bounded to a few instructions of
+        // stack unwind under the lock.
+        let r = ChildRegistry::new();
+        {
+            let _guard = r.register_pid_with_guard(99);
+            assert_eq!(r.current(), Some(99));
+        }
+        assert_eq!(
+            r.current(),
+            None,
+            "guard must clear the registry on drop"
+        );
+    }
+
+    #[test]
+    fn registration_guard_clears_even_on_early_return_path() {
+        // Same shape as above but pinning that the guard's Drop runs
+        // even when the surrounding scope exits via `?`-propagation
+        // (i.e. an error path). Without the guard pattern the call
+        // site has to remember to clear; with it, Drop handles every
+        // exit path.
+        fn inner(r: &ChildRegistry) -> Result<(), &'static str> {
+            let _g = r.register_pid_with_guard(7);
+            Err("simulated playback error")
+        }
+        let r = ChildRegistry::new();
+        let _ = inner(&r);
         assert_eq!(r.current(), None);
     }
 }

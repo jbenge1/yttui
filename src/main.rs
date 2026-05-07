@@ -17,7 +17,7 @@ use ratatui::backend::CrosstermBackend;
 use yttui::app::{Action, App};
 use yttui::cli::Cli;
 use yttui::dispatcher::{DispatchError, PendingSearch, SearchDispatcher};
-use yttui::player::{MpvPlayer, PlaybackOptions, play_result_with_pid_observer};
+use yttui::player::{MpvPlayer, PlaybackOptions, spawn_result};
 use yttui::search::{SearchResult, YtDlpBackend};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -202,13 +202,21 @@ fn play_with_swap(
     if let Err(e) = restore_terminal(terminal) {
         log::warn!("failed to leave alternate screen before mpv: {e}");
     }
-    let outcome = play_result_with_pid_observer(player, result, opts, &|pid| {
-        // Register the live mpv pgid with the signal-watcher so a
-        // SIGINT/SIGTERM at the parent terminal kills mpv too. See
-        // `yttui::signal` for the orphan-prevention rationale.
-        yttui::signal::REGISTRY.register(pid);
-    });
-    yttui::signal::REGISTRY.clear();
+    // `register_spawn` holds the registry mutex across the spawn so a
+    // SIGINT in the spawn-vs-register window cannot observe a transient
+    // `None` (#70). `_guard`'s Drop clears the registry on every exit
+    // path of this function, which structurally prevents the
+    // "registered, but child already reaped" leak (#71); the residual
+    // window between `wait()` returning and Drop is bounded to a
+    // handful of unwind instructions.
+    let outcome = match yttui::signal::REGISTRY.register_spawn::<_, _, _>(|| {
+        let running = spawn_result(player, result, opts)?;
+        let pid = running.pid();
+        Ok::<_, yttui::player::PlayerError>((running, pid))
+    }) {
+        Ok((running, _guard)) => running.wait(),
+        Err(e) => Err(e),
+    };
     if let Err(e) = re_enter_terminal(terminal) {
         log::warn!("failed to re-enter alternate screen after mpv: {e}");
     }

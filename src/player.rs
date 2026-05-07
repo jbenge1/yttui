@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
 
-use command_group::CommandGroup;
+use command_group::{CommandGroup, GroupChild};
 use thiserror::Error;
 
 use crate::search::SearchResult;
@@ -38,6 +38,62 @@ pub enum PlayerError {
     NotPlayable { reason: String },
 }
 
+/// A spawned-but-not-yet-waited-on player subprocess.
+///
+/// Returned by [`Player::spawn_player`] so the caller can register the
+/// pgid with the signal-watcher before blocking on wait. Splitting
+/// spawn from wait closes the spawn-vs-register race (#70): the
+/// registration can be performed under the same critical section as
+/// the spawn syscall, with no callback gymnastics.
+#[derive(Debug)]
+pub struct RunningPlayer {
+    inner: RunningInner,
+}
+
+#[derive(Debug)]
+enum RunningInner {
+    Real(GroupChild),
+    /// Test-only no-op: never spawned a real process. `pid()` returns
+    /// a placeholder, `wait()` returns the recorded result.
+    #[cfg(test)]
+    Fake(Result<(), PlayerError>),
+}
+
+impl RunningPlayer {
+    /// The process-group-leader pid. Stable for the lifetime of this
+    /// handle; the kernel reaps the pid only after [`Self::wait`].
+    #[must_use]
+    pub fn pid(&self) -> u32 {
+        match &self.inner {
+            RunningInner::Real(child) => {
+                // GroupChild::id() returns the underlying child's pid;
+                // since we used group_spawn, that pid is also the pgid.
+                child.id()
+            }
+            #[cfg(test)]
+            RunningInner::Fake(_) => 0,
+        }
+    }
+
+    /// Block until the player exits. Consumes the handle.
+    ///
+    /// # Errors
+    /// Returns [`PlayerError::Wait`] if the wait syscall itself fails,
+    /// [`PlayerError::NonZeroExit`] for a non-zero exit code, or
+    /// [`PlayerError::KilledBySignal`] (Unix) if the player was
+    /// signal-terminated.
+    pub fn wait(self) -> Result<(), PlayerError> {
+        match self.inner {
+            RunningInner::Real(mut child) => {
+                let status = child.wait().map_err(PlayerError::Wait)?;
+                classify_exit(status)
+            }
+            #[cfg(test)]
+            RunningInner::Fake(result) => result,
+        }
+    }
+}
+
 pub trait Player {
     /// Play the given `YouTube` video. Blocks until the player exits.
     ///
@@ -56,23 +112,24 @@ pub trait Player {
         video_id: &str,
         opts: &PlaybackOptions,
     ) -> Result<(), PlayerError> {
-        self.play_with_pid_observer(video_id, opts, &|_| {})
+        self.spawn_player(video_id, opts)?.wait()
     }
 
-    /// Variant of [`Self::play`] that invokes `on_spawn` once the
-    /// player subprocess has been started, passing the
-    /// process-group-leader pid. Used by the signal handler so a
-    /// Ctrl-C at the parent terminal can kill the player's group on
-    /// the way out instead of orphaning it.
+    /// Spawn the player subprocess and return a [`RunningPlayer`]
+    /// handle. The caller is responsible for calling [`RunningPlayer::wait`]
+    /// (directly or transitively). The split lets the caller register
+    /// the pgid with the signal-watcher *between* spawn and wait, under
+    /// the same lock as the spawn syscall — closing the spawn-vs-register
+    /// race window (#70).
     ///
     /// # Errors
-    /// Same as [`Self::play`].
-    fn play_with_pid_observer(
+    /// Returns [`PlayerError::Spawn`] if the player binary cannot be
+    /// launched.
+    fn spawn_player(
         &self,
         video_id: &str,
         opts: &PlaybackOptions,
-        on_spawn: &dyn Fn(u32),
-    ) -> Result<(), PlayerError>;
+    ) -> Result<RunningPlayer, PlayerError>;
 }
 
 #[derive(Debug, Clone)]
@@ -122,30 +179,25 @@ fn classify_exit(status: ExitStatus) -> Result<(), PlayerError> {
 }
 
 impl Player for MpvPlayer {
-    fn play_with_pid_observer(
+    fn spawn_player(
         &self,
         video_id: &str,
         opts: &PlaybackOptions,
-        on_spawn: &dyn Fn(u32),
-    ) -> Result<(), PlayerError> {
+    ) -> Result<RunningPlayer, PlayerError> {
         let args = mpv_args(video_id, opts);
         // Spawn the player in its own process group so that:
         //   1. We can kill the entire group (including any helper processes
         //      mpv forks) by killing the leader.
         //   2. The signal-watcher thread (`yttui::signal`) can kill the
-        //      group on SIGINT/SIGTERM via the pid handed to `on_spawn`,
+        //      group on SIGINT/SIGTERM via the registered pgid,
         //      preventing orphaned mpv processes (V1 AC #4).
         // Note: SIGKILL on the parent is not interceptable; an orphan
         // can still occur if the user `kill -9`s yttui itself.
-        let mut child = Command::new(&self.binary)
+        let child = Command::new(&self.binary)
             .args(&args)
             .group_spawn()
             .map_err(PlayerError::Spawn)?;
-        // GroupChild::id() returns the underlying child's pid; since
-        // we used group_spawn, that pid is also the pgid.
-        on_spawn(child.id());
-        let status = child.wait().map_err(PlayerError::Wait)?;
-        classify_exit(status)
+        Ok(RunningPlayer { inner: RunningInner::Real(child) })
     }
 }
 
@@ -161,27 +213,28 @@ pub fn play_result<P: Player>(
     result: &SearchResult,
     opts: &PlaybackOptions,
 ) -> Result<(), PlayerError> {
-    play_result_with_pid_observer(player, result, opts, &|_| {})
+    spawn_result(player, result, opts)?.wait()
 }
 
-/// Same as [`play_result`] but threads `on_spawn` down to the player so
-/// the caller can register the live process-group-leader pid (e.g.
-/// with [`crate::signal::REGISTRY`]) before the wait blocks.
+/// Spawn the player for a [`SearchResult`] without waiting on it.
+///
+/// Returns a [`RunningPlayer`] handle; used by callers that need to
+/// register the pgid with the signal-watcher before blocking on wait
+/// (closing #70's spawn-vs-register race).
 ///
 /// # Errors
-/// Same as [`play_result`].
-pub fn play_result_with_pid_observer<P: Player>(
+/// Same as [`play_result`] for the spawn path.
+pub fn spawn_result<P: Player>(
     player: &P,
     result: &SearchResult,
     opts: &PlaybackOptions,
-    on_spawn: &dyn Fn(u32),
-) -> Result<(), PlayerError> {
+) -> Result<RunningPlayer, PlayerError> {
     if !result.duration.is_playable() {
         return Err(PlayerError::NotPlayable {
             reason: result.duration.to_string(),
         });
     }
-    player.play_with_pid_observer(&result.id, opts, on_spawn)
+    player.spawn_player(&result.id, opts)
 }
 
 #[cfg(test)]
@@ -237,28 +290,21 @@ mod tests {
     }
 
     #[test]
-    fn play_with_pid_observer_invokes_callback_with_live_pid() {
+    fn spawn_player_returns_running_player_with_live_pid() {
         // Pin the contract the signal handler depends on: when
-        // MpvPlayer spawns the player, it must hand the pgid to
-        // `on_spawn` *before* it blocks on wait — otherwise the
+        // MpvPlayer spawns the player, the caller must be able to
+        // observe the pgid *before* blocking on wait — otherwise the
         // signal-watcher has nothing to kill and we re-orphan mpv on
-        // Ctrl-C. `true` is fine here: it spawns + exits immediately,
-        // so we just need to confirm we got *some* non-zero pid.
-        use std::sync::Mutex;
+        // Ctrl-C. `true` exits immediately; we just need a non-zero pid.
         let player = MpvPlayer {
             binary: PathBuf::from("true"),
         };
-        let observed: Mutex<Vec<u32>> = Mutex::new(Vec::new());
-        player
-            .play_with_pid_observer(
-                "anything",
-                &PlaybackOptions::default(),
-                &|pid| observed.lock().unwrap().push(pid),
-            )
+        let running = player
+            .spawn_player("anything", &PlaybackOptions::default())
             .unwrap();
-        let pids = observed.into_inner().unwrap();
-        assert_eq!(pids.len(), 1, "observer must be called exactly once");
-        assert!(pids[0] > 0, "pid must be set: {pids:?}");
+        let pid = running.pid();
+        assert!(pid > 0, "pid must be set: {pid}");
+        running.wait().unwrap();
     }
 
     #[test]
@@ -335,15 +381,16 @@ mod tests {
     }
 
     impl Player for FakePlayer {
-        fn play_with_pid_observer(
+        fn spawn_player(
             &self,
             video_id: &str,
             opts: &PlaybackOptions,
-            _on_spawn: &dyn Fn(u32),
-        ) -> Result<(), PlayerError> {
+        ) -> Result<RunningPlayer, PlayerError> {
             *self.called_with.lock().unwrap() =
                 Some((video_id.to_string(), opts.audio_only));
-            Ok(())
+            Ok(RunningPlayer {
+                inner: RunningInner::Fake(Ok(())),
+            })
         }
     }
 

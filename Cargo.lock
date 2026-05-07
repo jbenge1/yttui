@@ -2103,6 +2103,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "log",
+ "nix 0.27.1",
  "predicates",
  "ratatui",
  "serde",
