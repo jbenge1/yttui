@@ -36,6 +36,31 @@ pub struct PendingSearch {
     pub cancel: Arc<AtomicBool>,
 }
 
+impl PendingSearch {
+    /// Non-blocking poll for a worker outcome. The dispatcher owns the
+    /// `Disconnected → WorkerPanicked` mapping so consumers don't have
+    /// to construct dispatcher-internal error variants themselves
+    /// (#73). An empty channel returns `Ok(None)`.
+    ///
+    /// # Errors
+    /// Returns [`DispatchError::WorkerPanicked`] if the worker thread
+    /// dropped its sender without producing an outcome — i.e. the
+    /// backend closure panicked. The inner backend errors are still
+    /// carried inside the `SearchOutcome` tuple's `Result` so the main
+    /// loop can render them via the seq-aware path.
+    pub fn try_recv(
+        &self,
+    ) -> Result<Option<SearchOutcome>, DispatchError> {
+        match self.rx.try_recv() {
+            Ok(outcome) => Ok(Some(outcome)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err(DispatchError::WorkerPanicked)
+            }
+        }
+    }
+}
+
 /// Owns the running-search bookkeeping: a sequence counter the main
 /// loop consults to discard stale results, and the backend used to do
 /// the actual work.
@@ -259,5 +284,62 @@ mod tests {
         assert_eq!(d.current_seq(), 3);
         assert_ne!(p1_seq, d.current_seq(), "p1 must read as stale");
         assert_eq!(p2_seq, d.current_seq(), "p2 must read as fresh");
+    }
+
+    #[test]
+    fn try_recv_returns_none_for_empty_channel() {
+        // Pin: a non-disconnected empty channel maps to Ok(None), so
+        // the main loop can keep polling without spuriously rendering
+        // a "worker crashed" error.
+        let backend = BarrierBackend::new(2);
+        let barrier = backend.barrier.clone();
+        let d = SearchDispatcher::new(backend);
+        let p = d.dispatch("a".into(), 1, false);
+        assert!(matches!(p.try_recv(), Ok(None)));
+        // Release the worker so the test cleans up.
+        barrier.wait();
+        let _ = p.rx.recv();
+    }
+
+    #[test]
+    fn try_recv_returns_some_for_completed_outcome() {
+        // Pin: a delivered outcome is wrapped in Ok(Some(_)), with the
+        // inner Result-of-Vec preserved verbatim so the main loop can
+        // still seq-compare and route SearchError into LastError::Search.
+        let d = SearchDispatcher::new(InstantBackend);
+        let p = d.dispatch("a".into(), 1, false);
+        // Drain via the dispatcher-owned method.
+        let (_seq, outcome) = loop {
+            match p.try_recv() {
+                Ok(Some(out)) => break out,
+                Ok(None) => std::thread::sleep(
+                    std::time::Duration::from_millis(1),
+                ),
+                Err(e) => panic!("unexpected error: {e:?}"),
+            }
+        };
+        assert_eq!(outcome.unwrap()[0].id, "a");
+    }
+
+    #[test]
+    fn try_recv_maps_disconnected_to_worker_panicked() {
+        // Pin #73: PendingSearch owns the Disconnected→WorkerPanicked
+        // mapping so the consumer (main.rs) never has to construct a
+        // dispatcher-internal variant by hand. Without an actual panic
+        // (which std::thread will print to stderr noisily and is
+        // racy), we synthesize the exact channel state a panicked
+        // worker would leave behind: drop the sender without sending.
+        let (tx, rx) = mpsc::channel::<SearchOutcome>();
+        drop(tx);
+        let p = PendingSearch {
+            rx,
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        match p.try_recv() {
+            Err(DispatchError::WorkerPanicked) => {}
+            other => panic!(
+                "expected WorkerPanicked, got {other:?}"
+            ),
+        }
     }
 }

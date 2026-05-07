@@ -1,6 +1,5 @@
 use std::io::{self, Stdout};
 use std::sync::Arc;
-use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
 use clap::Parser;
@@ -16,7 +15,7 @@ use ratatui::backend::CrosstermBackend;
 
 use yttui::app::{Action, App};
 use yttui::cli::Cli;
-use yttui::dispatcher::{DispatchError, PendingSearch, SearchDispatcher};
+use yttui::dispatcher::{PendingSearch, SearchDispatcher};
 use yttui::player::{MpvPlayer, PlaybackOptions, spawn_result};
 use yttui::search::{SearchResult, YtDlpBackend};
 
@@ -97,10 +96,13 @@ fn run(terminal: &mut Term, cli: &Cli) -> io::Result<()> {
     loop {
         terminal.draw(|frame| yttui::tui::draw(frame, &mut app))?;
 
-        // Drain any completed search before polling input.
+        // Drain any completed search before polling input. The
+        // dispatcher owns the Disconnected→WorkerPanicked mapping
+        // (#73) so this consumer no longer has to construct any
+        // DispatchError variants directly.
         if let Some(p) = &pending_search {
-            match p.rx.try_recv() {
-                Ok((seq, outcome)) => {
+            match p.try_recv() {
+                Ok(Some((seq, outcome))) => {
                     // The `seq != current_seq()` arm is currently
                     // unreachable in production: `pending_search` is
                     // overwritten by every new dispatch and nulled by
@@ -119,21 +121,25 @@ fn run(terminal: &mut Term, cli: &Cli) -> io::Result<()> {
                         // so the outcome is discarded by the channel.
                         match outcome {
                             Ok(results) => app.set_results(results),
+                            // `#[from]` on `DispatchError::Search` lets
+                            // the bare backend error lift via `into()`
+                            // without naming the variant — keeps this
+                            // call site free of dispatcher-internal
+                            // variant construction.
                             Err(e) => app.set_search_error(Arc::new(
-                                DispatchError::Search(e),
+                                e.into(),
                             )),
                         }
                     }
                     pending_search = None;
                 }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => {
-                    // The worker dropped its sender without sending —
-                    // i.e. the closure panicked. Surface this so the
-                    // user doesn't see a perma-spinner.
-                    app.set_search_error(Arc::new(
-                        DispatchError::WorkerPanicked,
-                    ));
+                Ok(None) => {}
+                Err(e) => {
+                    // Worker thread dropped its sender without sending
+                    // — i.e. its closure panicked. Surface so the user
+                    // doesn't see a perma-spinner. `e` is the
+                    // dispatcher-constructed `DispatchError::WorkerPanicked`.
+                    app.set_search_error(Arc::new(e));
                     pending_search = None;
                 }
             }
