@@ -28,7 +28,17 @@ impl SortOrder {
 pub enum VideoDuration {
     Seconds(u64),
     Live,
+    Upcoming,
     Unknown,
+}
+
+impl VideoDuration {
+    /// Whether this video is currently watchable. Upcoming streams
+    /// (scheduled but not started) are explicitly not playable.
+    #[must_use]
+    pub fn is_playable(&self) -> bool {
+        !matches!(self, VideoDuration::Upcoming)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,10 +228,12 @@ fn entry_to_result(entry: &serde_json::Value) -> Option<SearchResult> {
 }
 
 fn parse_duration(entry: &serde_json::Value) -> VideoDuration {
-    if let Some(status) = entry.get("live_status").and_then(serde_json::Value::as_str)
-        && (status == "is_live" || status == "is_upcoming")
-    {
-        return VideoDuration::Live;
+    if let Some(status) = entry.get("live_status").and_then(serde_json::Value::as_str) {
+        match status {
+            "is_live" => return VideoDuration::Live,
+            "is_upcoming" => return VideoDuration::Upcoming,
+            _ => {}
+        }
     }
     match entry.get("duration").and_then(serde_json::Value::as_f64) {
         Some(d) if d.is_finite() && d >= 0.0 => {
@@ -239,6 +251,7 @@ fn parse_duration(entry: &serde_json::Value) -> VideoDuration {
 pub fn format_duration(d: &VideoDuration) -> String {
     match d {
         VideoDuration::Live => "LIVE".to_string(),
+        VideoDuration::Upcoming => "UPCOMING".to_string(),
         VideoDuration::Unknown => "—".to_string(),
         VideoDuration::Seconds(s) => {
             let h = s / 3600;
@@ -295,6 +308,29 @@ mod tests {
         let results = parse_results(FIXTURE_LIVE).expect("parses");
         assert!(!results.is_empty());
         assert!(results.iter().all(|r| r.duration == VideoDuration::Live));
+    }
+
+    #[test]
+    fn upcoming_stream_is_distinct_from_live() {
+        let json = br#"{
+            "entries": [
+                {"id": "a", "title": "Live now", "live_status": "is_live"},
+                {"id": "b", "title": "Scheduled", "live_status": "is_upcoming"},
+                {"id": "c", "title": "Past", "live_status": "was_live", "duration": 120.0}
+            ]
+        }"#;
+        let r = parse_results(json).unwrap();
+        assert_eq!(r[0].duration, VideoDuration::Live);
+        assert_eq!(r[1].duration, VideoDuration::Upcoming);
+        assert_eq!(r[2].duration, VideoDuration::Seconds(120));
+    }
+
+    #[test]
+    fn upcoming_is_not_playable() {
+        assert!(VideoDuration::Live.is_playable());
+        assert!(VideoDuration::Seconds(60).is_playable());
+        assert!(VideoDuration::Unknown.is_playable());
+        assert!(!VideoDuration::Upcoming.is_playable());
     }
 
     #[test]
@@ -361,6 +397,7 @@ mod tests {
         assert_eq!(format_duration(&VideoDuration::Seconds(2404)), "40:04");
         assert_eq!(format_duration(&VideoDuration::Seconds(3661)), "1:01:01");
         assert_eq!(format_duration(&VideoDuration::Live), "LIVE");
+        assert_eq!(format_duration(&VideoDuration::Upcoming), "UPCOMING");
         assert_eq!(format_duration(&VideoDuration::Unknown), "—");
     }
 
