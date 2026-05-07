@@ -109,27 +109,19 @@ impl App {
     /// side-effect the main loop should perform.
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         // Any key clears a stale error banner (visual nudge that we
-        // accepted input).
-        let cleared_error = self.last_error.take().is_some();
+        // accepted input). The cleared banner is its own side effect:
+        // the next draw picks up `self.last_error == None` automatically,
+        // so we don't need to convert "cleared" into an Action here.
+        self.last_error.take();
         let g_was_pending = std::mem::replace(&mut self.g_pending, false);
 
-        let action = match self.screen.clone() {
+        match self.screen.clone() {
             Screen::Prompt => self.handle_prompt(key),
             Screen::Searching => self.handle_searching(key),
             Screen::Results => self.handle_results(key, g_was_pending),
             Screen::Filter => self.handle_filter(key),
             Screen::Help => self.handle_help(key),
-        };
-
-        // If nothing happened and we cleared an error, that *was* the
-        // action — don't return None and lose the redraw signal. (The
-        // renderer reacts to state changes; clearing the error is a
-        // state change.)
-        if action == Action::None && cleared_error {
-            // No-op return is fine — the redraw will pick up the change
-            // because we mutated last_error.
         }
-        action
     }
 
     fn handle_prompt(&mut self, key: KeyEvent) -> Action {
@@ -715,6 +707,39 @@ mod tests {
         app.set_search_error(timeout_dispatch_error());
         assert_eq!(app.screen, Screen::Results);
         assert_eq!(app.results.len(), original_count);
+        assert!(app.last_error.is_some());
+    }
+
+    #[test]
+    fn set_player_error_keeps_user_on_results() {
+        // Player errors land on a cued-up result; the user has already
+        // committed to "this list", so we don't bounce them anywhere
+        // — just stash the error for the footer banner.
+        let mut app = results_app();
+        let original_screen = app.screen.clone();
+        let original_count = app.results.len();
+        app.set_player_error(Arc::new(PlayerError::NonZeroExit(1)));
+        assert_eq!(app.screen, original_screen);
+        assert_eq!(app.results.len(), original_count);
+        match app.last_error {
+            Some(LastError::Player(_)) => {}
+            other => panic!("expected LastError::Player, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_player_error_does_not_overwrite_search_state() {
+        // Player error during a fresh "no results yet" state shouldn't
+        // touch the prompt input or committed query.
+        let mut app = App::new();
+        app.committed_query = Some("rust".to_string());
+        app.input = "rust".to_string();
+        app.screen = Screen::Results;
+        app.set_player_error(Arc::new(PlayerError::NotPlayable {
+            reason: "upcoming livestream".to_string(),
+        }));
+        assert_eq!(app.committed_query.as_deref(), Some("rust"));
+        assert_eq!(app.input, "rust");
         assert!(app.last_error.is_some());
     }
 

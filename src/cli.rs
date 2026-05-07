@@ -34,7 +34,9 @@ pub const LONG_VERSION: &str = concat!(
     // directly (without clap's "yttui " prefix on the first line) and
     // accept both `-V` and `-v` as aliases.
     disable_version_flag = true,
-    about = "Keyboard-driven YouTube TUI",
+    // Reuse the Cargo.toml description verbatim so `yttui --help` and
+    // crates.io agree on the one-liner.
+    about = env!("CARGO_PKG_DESCRIPTION"),
     long_about = "Search YouTube and play results via mpv. \
                   Vim-keyed list, no Invidious dependency, no telemetry."
 )]
@@ -172,5 +174,19 @@ mod tests {
     fn help_flag_returns_clap_help_error() {
         let err = parse(&["--help"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn clap_about_matches_cargo_pkg_description() {
+        // Pin for second-opinion P2 #9: --help and crates.io must show
+        // the same one-liner. Reading clap's about back from a built
+        // Command catches a future drift if someone forgets the
+        // env!() wiring.
+        let cmd = <Cli as clap::CommandFactory>::command();
+        let about = cmd
+            .get_about()
+            .map(ToString::to_string)
+            .expect("about set");
+        assert_eq!(about, env!("CARGO_PKG_DESCRIPTION"));
     }
 }
