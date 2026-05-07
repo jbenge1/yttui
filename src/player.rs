@@ -1,21 +1,28 @@
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 
+use command_group::CommandGroup;
 use thiserror::Error;
 
 use crate::search::SearchResult;
 
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct PlaybackOptions {
     pub audio_only: bool,
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum PlayerError {
     #[error("failed to launch player: {0}")]
     Spawn(#[source] std::io::Error),
+    #[error("failed waiting for player: {0}")]
+    Wait(#[source] std::io::Error),
     #[error("player exited with status {0}")]
     NonZeroExit(i32),
+    #[error("player was killed by signal {0}")]
+    KilledBySignal(i32),
     #[error("video is not playable: {reason}")]
     NotPlayable { reason: String },
 }
@@ -23,9 +30,16 @@ pub enum PlayerError {
 pub trait Player {
     /// Play the given `YouTube` video. Blocks until the player exits.
     ///
+    /// **Terminal contract:** the player inherits the parent's stdio. Any
+    /// caller rendering a TUI **must** leave their alternate screen
+    /// (and restore the cursor) before calling `play`, then re-enter
+    /// after it returns. Otherwise the player will scribble over the
+    /// TUI buffer.
+    ///
     /// # Errors
-    /// Returns [`PlayerError`] if the player binary cannot be spawned, the
-    /// wait fails, or the player exits non-zero.
+    /// Returns [`PlayerError`] if the binary cannot be spawned, the wait
+    /// fails, the player exits non-zero, or the player is killed by a
+    /// signal (Unix only).
     fn play(
         &self,
         video_id: &str,
@@ -47,18 +61,36 @@ impl Default for MpvPlayer {
 }
 
 #[must_use]
-pub fn youtube_url(video_id: &str) -> String {
+pub(crate) fn youtube_url(video_id: &str) -> String {
     format!("https://www.youtube.com/watch?v={video_id}")
 }
 
 #[must_use]
-pub fn mpv_args(video_id: &str, opts: &PlaybackOptions) -> Vec<String> {
+pub(crate) fn mpv_args(video_id: &str, opts: &PlaybackOptions) -> Vec<String> {
     let mut args = Vec::new();
     if opts.audio_only {
         args.push("--no-video".to_string());
     }
     args.push(youtube_url(video_id));
     args
+}
+
+/// Map an `ExitStatus` to either `Ok(())` or the appropriate error variant.
+/// On Unix, signal-terminated processes are reported as
+/// [`PlayerError::KilledBySignal`]; otherwise non-zero exits are
+/// [`PlayerError::NonZeroExit`].
+fn classify_exit(status: ExitStatus) -> Result<(), PlayerError> {
+    if status.success() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return Err(PlayerError::KilledBySignal(sig));
+        }
+    }
+    Err(PlayerError::NonZeroExit(status.code().unwrap_or(-1)))
 }
 
 impl Player for MpvPlayer {
@@ -68,14 +100,21 @@ impl Player for MpvPlayer {
         opts: &PlaybackOptions,
     ) -> Result<(), PlayerError> {
         let args = mpv_args(video_id, opts);
-        let status = Command::new(&self.binary)
+        // Spawn the player in its own process group so that:
+        //   1. We can kill the entire group (including any helper processes
+        //      mpv forks) by killing the leader.
+        //   2. A future Ctrl-C handler / panic hook on the parent can clean
+        //      up subprocesses without leaking orphans (V1 spec
+        //      requirement).
+        // Note: SIGKILL on the parent is not interceptable; an orphan can
+        // still occur if the user `kill -9`s yttui itself. Catchable
+        // signals will be wired up in Slice 3 / 4.
+        let mut child = Command::new(&self.binary)
             .args(&args)
-            .status()
+            .group_spawn()
             .map_err(PlayerError::Spawn)?;
-        if !status.success() {
-            return Err(PlayerError::NonZeroExit(status.code().unwrap_or(-1)));
-        }
-        Ok(())
+        let status = child.wait().map_err(PlayerError::Wait)?;
+        classify_exit(status)
     }
 }
 
@@ -93,7 +132,7 @@ pub fn play_result<P: Player>(
 ) -> Result<(), PlayerError> {
     if !result.duration.is_playable() {
         return Err(PlayerError::NotPlayable {
-            reason: format!("video is {:?}", result.duration),
+            reason: result.duration.to_string(),
         });
     }
     player.play(&result.id, opts)
@@ -132,8 +171,8 @@ mod tests {
 
     #[test]
     fn url_is_always_last_arg() {
-        // The URL is mpv's positional "file" argument and must come after
-        // any flags, otherwise mpv parses subsequent flags as files.
+        // mpv treats the URL as a positional file argument; flags after
+        // it get parsed as additional files.
         let args = mpv_args(
             "id",
             &PlaybackOptions {
@@ -145,8 +184,6 @@ mod tests {
 
     #[test]
     fn play_succeeds_with_zero_exit_binary() {
-        // `true` exits 0 regardless of args. Exercises the spawn + wait
-        // path without needing real mpv installed.
         let player = MpvPlayer {
             binary: PathBuf::from("true"),
         };
@@ -178,17 +215,50 @@ mod tests {
         assert!(matches!(err, PlayerError::Spawn(_)));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn classify_signal_killed_status() {
+        use std::os::unix::process::ExitStatusExt;
+        // Raw status with low byte = signal number, no exit code set.
+        // 15 = SIGTERM.
+        let status = ExitStatus::from_raw(15);
+        let err = classify_exit(status).unwrap_err();
+        assert!(
+            matches!(err, PlayerError::KilledBySignal(15)),
+            "expected KilledBySignal(15), got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_non_zero_exit_status() {
+        use std::os::unix::process::ExitStatusExt;
+        // Raw status: exit code 1 in the high byte (the WEXITSTATUS layout).
+        let status = ExitStatus::from_raw(1 << 8);
+        let err = classify_exit(status).unwrap_err();
+        assert!(
+            matches!(err, PlayerError::NonZeroExit(1)),
+            "expected NonZeroExit(1), got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_zero_exit_is_ok() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = ExitStatus::from_raw(0);
+        classify_exit(status).unwrap();
+    }
+
     /// Test double that records what it was asked to play without spawning.
     struct FakePlayer {
         called_with: std::sync::Mutex<Option<(String, bool)>>,
-        result: std::sync::Mutex<Result<(), PlayerError>>,
     }
 
     impl FakePlayer {
-        fn ok() -> Self {
+        fn new() -> Self {
             Self {
                 called_with: std::sync::Mutex::new(None),
-                result: std::sync::Mutex::new(Ok(())),
             }
         }
     }
@@ -201,7 +271,7 @@ mod tests {
         ) -> Result<(), PlayerError> {
             *self.called_with.lock().unwrap() =
                 Some((video_id.to_string(), opts.audio_only));
-            std::mem::replace(&mut *self.result.lock().unwrap(), Ok(()))
+            Ok(())
         }
     }
 
@@ -216,7 +286,7 @@ mod tests {
 
     #[test]
     fn play_result_refuses_upcoming_streams() {
-        let player = FakePlayer::ok();
+        let player = FakePlayer::new();
         let r = result_with_duration(VideoDuration::Upcoming);
         let err =
             play_result(&player, &r, &PlaybackOptions::default()).unwrap_err();
@@ -228,8 +298,25 @@ mod tests {
     }
 
     #[test]
+    fn not_playable_reason_uses_human_phrasing() {
+        let player = FakePlayer::new();
+        let r = result_with_duration(VideoDuration::Upcoming);
+        let err =
+            play_result(&player, &r, &PlaybackOptions::default()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("upcoming livestream"),
+            "expected human phrasing, got: {msg}"
+        );
+        assert!(
+            !msg.contains("Upcoming"),
+            "Debug enum syntax leaked into user-facing message: {msg}"
+        );
+    }
+
+    #[test]
     fn play_result_allows_live_streams() {
-        let player = FakePlayer::ok();
+        let player = FakePlayer::new();
         let r = result_with_duration(VideoDuration::Live);
         play_result(&player, &r, &PlaybackOptions::default()).unwrap();
         let called = player.called_with.lock().unwrap().clone().unwrap();
@@ -238,7 +325,7 @@ mod tests {
 
     #[test]
     fn play_result_allows_known_duration() {
-        let player = FakePlayer::ok();
+        let player = FakePlayer::new();
         let r = result_with_duration(VideoDuration::Seconds(120));
         play_result(&player, &r, &PlaybackOptions::default()).unwrap();
         assert!(player.called_with.lock().unwrap().is_some());
@@ -248,7 +335,7 @@ mod tests {
     fn play_result_allows_unknown_duration() {
         // Unknown duration shouldn't block playback — the video might be
         // perfectly playable; we just lack metadata.
-        let player = FakePlayer::ok();
+        let player = FakePlayer::new();
         let r = result_with_duration(VideoDuration::Unknown);
         play_result(&player, &r, &PlaybackOptions::default()).unwrap();
         assert!(player.called_with.lock().unwrap().is_some());
@@ -256,7 +343,7 @@ mod tests {
 
     #[test]
     fn play_result_forwards_audio_only_flag() {
-        let player = FakePlayer::ok();
+        let player = FakePlayer::new();
         let r = result_with_duration(VideoDuration::Seconds(60));
         play_result(
             &player,

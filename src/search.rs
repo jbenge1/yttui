@@ -1,3 +1,4 @@
+use std::fmt;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -41,6 +42,26 @@ impl VideoDuration {
     }
 }
 
+impl fmt::Display for VideoDuration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VideoDuration::Live => f.write_str("live broadcast"),
+            VideoDuration::Upcoming => f.write_str("upcoming livestream"),
+            VideoDuration::Unknown => f.write_str("unknown duration"),
+            VideoDuration::Seconds(s) => {
+                let h = s / 3600;
+                let m = (s % 3600) / 60;
+                let s = s % 60;
+                if h > 0 {
+                    write!(f, "{h}:{m:02}:{s:02}")
+                } else {
+                    write!(f, "{m}:{s:02}")
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchResult {
     pub id: String,
@@ -59,6 +80,8 @@ pub enum SearchError {
     Wait(#[source] std::io::Error),
     #[error("failed to read yt-dlp output: {0}")]
     Read(#[source] std::io::Error),
+    #[error("yt-dlp output reader thread panicked")]
+    ReaderPanicked,
     #[error("yt-dlp exited with status {status}: {stderr}")]
     NonZeroExit { status: i32, stderr: String },
     #[error("yt-dlp timed out after {0:?}")]
@@ -143,9 +166,7 @@ impl SearchBackend for YtDlpBackend {
 
         let stdout_buf = stdout_thread
             .join()
-            .map_err(|_| {
-                SearchError::Read(std::io::Error::other("stdout reader panicked"))
-            })?
+            .map_err(|_| SearchError::ReaderPanicked)?
             .map_err(SearchError::Read)?;
         let stderr_buf = stderr_thread
             .join()
@@ -323,6 +344,19 @@ mod tests {
         assert_eq!(r[0].duration, VideoDuration::Live);
         assert_eq!(r[1].duration, VideoDuration::Upcoming);
         assert_eq!(r[2].duration, VideoDuration::Seconds(120));
+    }
+
+    #[test]
+    fn duration_display_uses_human_phrasing() {
+        assert_eq!(VideoDuration::Live.to_string(), "live broadcast");
+        assert_eq!(
+            VideoDuration::Upcoming.to_string(),
+            "upcoming livestream"
+        );
+        assert_eq!(VideoDuration::Unknown.to_string(), "unknown duration");
+        assert_eq!(VideoDuration::Seconds(0).to_string(), "0:00");
+        assert_eq!(VideoDuration::Seconds(2404).to_string(), "40:04");
+        assert_eq!(VideoDuration::Seconds(3661).to_string(), "1:01:01");
     }
 
     #[test]
