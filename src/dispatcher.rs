@@ -11,10 +11,11 @@ use thiserror::Error;
 
 use crate::search::{SearchBackend, SearchError, SearchResult, SortOrder};
 
-/// Errors surfaced by the dispatcher to the main loop. Distinct from
-/// [`SearchError`] because some failure modes (e.g. the worker thread
-/// panicking before producing any outcome) are dispatch-layer concerns
-/// the backend cannot itself construct.
+/// Errors surfaced by the dispatcher to the main loop.
+///
+/// Distinct from [`SearchError`] because some failure modes (e.g. the
+/// worker thread panicking before producing any outcome) are
+/// dispatch-layer concerns the backend cannot itself construct.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum DispatchError {

@@ -41,6 +41,10 @@ missing_debug_implementations = "warn"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
 cast_possible_truncation = "deny"
 cast_sign_loss = "deny"
 unwrap_used = "deny"
+# `cargo` group: kept off because it warns about dual-version transitive
+# crates (e.g. `thiserror 1` pulled in by ratatui's optional termwiz
+# feature, which we don't compile). See SecondOpinion.md F11 for rationale.

@@ -21,10 +21,10 @@ pub enum SortOrder {
 
 impl SortOrder {
     #[must_use]
-    fn ytsearch_prefix(self) -> &'static str {
+    const fn ytsearch_prefix(self) -> &'static str {
         match self {
-            SortOrder::Relevance => "ytsearch",
-            SortOrder::Date => "ytsearchdate",
+            Self::Relevance => "ytsearch",
+            Self::Date => "ytsearchdate",
         }
     }
 }
@@ -42,18 +42,18 @@ impl VideoDuration {
     /// Whether this video is currently watchable. Upcoming streams
     /// (scheduled but not started) are explicitly not playable.
     #[must_use]
-    pub fn is_playable(&self) -> bool {
-        !matches!(self, VideoDuration::Upcoming)
+    pub const fn is_playable(&self) -> bool {
+        !matches!(self, Self::Upcoming)
     }
 }
 
 impl fmt::Display for VideoDuration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            VideoDuration::Live => f.write_str("live broadcast"),
-            VideoDuration::Upcoming => f.write_str("upcoming livestream"),
-            VideoDuration::Unknown => f.write_str("unknown duration"),
-            VideoDuration::Seconds(s) => {
+            Self::Live => f.write_str("live broadcast"),
+            Self::Upcoming => f.write_str("upcoming livestream"),
+            Self::Unknown => f.write_str("unknown duration"),
+            Self::Seconds(s) => {
                 let h = s / 3600;
                 let m = (s % 3600) / 60;
                 let s = s % 60;

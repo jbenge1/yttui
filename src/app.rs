@@ -42,8 +42,8 @@ impl LastError {
     #[must_use]
     pub fn message(&self) -> String {
         match self {
-            LastError::Search(e) => e.to_string(),
-            LastError::Player(e) => e.to_string(),
+            Self::Search(e) => e.to_string(),
+            Self::Player(e) => e.to_string(),
         }
     }
 }
@@ -93,7 +93,7 @@ impl Default for App {
 
 impl App {
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             screen: Screen::Prompt,
             help_return: None,

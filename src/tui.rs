@@ -82,16 +82,15 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             "Searching… (Esc to cancel)",
             Style::default().add_modifier(Modifier::DIM),
         )]),
-        Screen::Results | Screen::Help => {
-            if let Some(q) = &app.committed_query {
+        Screen::Results | Screen::Help => app.committed_query.as_ref().map_or_else(
+            || Line::from(""),
+            |q| {
                 Line::from(vec![
                     Span::styled("yt> ", Style::default().fg(Color::DarkGray)),
                     Span::raw(q.as_str()),
                 ])
-            } else {
-                Line::from("")
-            }
-        }
+            },
+        ),
         Screen::Filter => Line::from(vec![
             Span::styled("/", Style::default().fg(Color::Yellow)),
             Span::raw(&app.input),
@@ -326,36 +325,41 @@ fn greedy_prefix(s: &str, max_cols: usize) -> String {
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
-    let line = if let Some(err) = &app.last_error {
-        let icon = match err {
-            LastError::Search(_) => "search error: ",
-            LastError::Player(_) => "player error: ",
-        };
-        Line::from(vec![
-            Span::styled(
-                icon,
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(err.message(), Style::default().fg(Color::Red)),
-        ])
-    } else {
-        let hints = match app.screen {
-            Screen::Prompt => "Enter  search    Esc / Ctrl-C  quit",
-            Screen::Searching => "Esc  cancel",
-            Screen::Results => {
-                "j/k  move    Enter  play    /  filter    n  new    r  rerun    ?  help    q  quit"
-            }
-            Screen::Filter => "type to filter    Enter  commit    Esc  cancel",
-            Screen::Help => "any key to dismiss",
-        };
-        Line::from(Span::styled(
-            hints,
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
-        ))
-    };
+    let line = app.last_error.as_ref().map_or_else(
+        || hints_line_for(&app.screen),
+        |err| {
+            let icon = match err {
+                LastError::Search(_) => "search error: ",
+                LastError::Player(_) => "player error: ",
+            };
+            Line::from(vec![
+                Span::styled(
+                    icon,
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(err.message(), Style::default().fg(Color::Red)),
+            ])
+        },
+    );
     frame.render_widget(Paragraph::new(line), area);
+}
+
+fn hints_line_for(screen: &Screen) -> Line<'static> {
+    let hints = match screen {
+        Screen::Prompt => "Enter  search    Esc / Ctrl-C  quit",
+        Screen::Searching => "Esc  cancel",
+        Screen::Results => {
+            "j/k  move    Enter  play    /  filter    n  new    r  rerun    ?  help    q  quit"
+        }
+        Screen::Filter => "type to filter    Enter  commit    Esc  cancel",
+        Screen::Help => "any key to dismiss",
+    };
+    Line::from(Span::styled(
+        hints,
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM),
+    ))
 }
 
 fn draw_help_overlay(frame: &mut Frame, area: Rect) {

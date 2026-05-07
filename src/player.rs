@@ -17,7 +17,7 @@ impl PlaybackOptions {
     /// Needed because `#[non_exhaustive]` forbids struct-literal
     /// construction from outside the crate.
     #[must_use]
-    pub fn with_audio_only(mut self, audio_only: bool) -> Self {
+    pub const fn with_audio_only(mut self, audio_only: bool) -> Self {
         self.audio_only = audio_only;
         self
     }

@@ -54,7 +54,7 @@ fn main() {
     let run_result = run(&mut terminal, &cli);
     let restore_result = restore_terminal(&mut terminal);
 
-    let final_err = run_result.err().or(restore_result.err());
+    let final_err = run_result.err().or_else(|| restore_result.err());
     if let Some(e) = final_err {
         eprintln!("yttui: {e}");
         std::process::exit(1);
