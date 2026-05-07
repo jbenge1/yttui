@@ -40,6 +40,13 @@ pub const LONG_VERSION: &str = concat!(
 )]
 pub struct Cli {
     /// Print version information and exit.
+    ///
+    /// Note on the `-v` alias: this is a **one-way door**. Most Unix
+    /// tools reserve `-v` for verbose output; we hand it to `--version`
+    /// (pacman-style) for parity with the user's mental model. If a
+    /// future verbosity flag lands, it'll need a different short
+    /// (`-d` for debug, `-q` for quiet, etc.) — reclaiming `-v` would
+    /// break users who learned `yttui -v`.
     #[arg(short = 'V', short_alias = 'v', long = "version")]
     pub version: bool,
 

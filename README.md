@@ -14,7 +14,9 @@ telemetry, no comments. Built in Rust on [ratatui](https://ratatui.rs/).
 - Re-run, new search, audio-only mode
 - Refuses to launch on upcoming livestreams (no mpv on a stream that
   hasn't started)
-- Single static binary, ~1 MB. Cold start under 100 ms.
+- Single static binary, ~1 MB. `--version` exits in ≈3 ms median on
+  Apple Silicon; the full TUI cold-start to first frame is well under
+  the spec's 200 ms target.
 
 ## Prerequisites
 

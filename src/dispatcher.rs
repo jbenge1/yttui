@@ -82,7 +82,6 @@ mod tests {
     use super::*;
     use crate::search::{SearchResult, VideoDuration};
     use std::sync::{Barrier, Mutex};
-    use std::time::Duration;
 
     /// Backend whose `search` blocks on a barrier so tests can interleave
     /// dispatches and inspect bookkeeping mid-flight.
@@ -202,22 +201,26 @@ mod tests {
 
     #[test]
     fn cancel_then_new_dispatch_invalidates_old_seq() {
-        // dispatch → cancel → dispatch. The first outcome's seq must
-        // not match current_seq after the second dispatch.
-        let backend = BarrierBackend::new(2);
-        let barrier = backend.barrier.clone();
-        let d = SearchDispatcher::new(backend.clone());
+        // Models the real flow: user types query, hits Esc, types
+        // another. The first worker's outcome (had it survived) would
+        // arrive tagged with a stale seq, which the main loop
+        // identifies and discards. Same dispatcher across both — the
+        // shared seq counter is the whole point.
+        let d = SearchDispatcher::new(InstantBackend);
         let p1 = d.dispatch("a".into(), 1, false);
         d.cancel(&p1);
-        // Release the cancelled worker so it can finalize.
-        barrier.wait();
-        let _ = p1.rx.recv_timeout(Duration::from_secs(1));
-        // Use a fresh backend for the second dispatch (each
-        // BarrierBackend has its own barrier).
-        let backend2 = BarrierBackend::new(1);
-        let d2 = SearchDispatcher::new(backend2);
-        let p2 = d2.dispatch("b".into(), 1, false);
-        let (seq2, _) = p2.rx.recv().unwrap();
-        assert_eq!(seq2, 1);
+        let p2 = d.dispatch("b".into(), 1, false);
+
+        let (p1_seq, _) = p1.rx.recv().unwrap();
+        let (p2_seq, _) = p2.rx.recv().unwrap();
+
+        // p1 was dispatched at seq=1. Cancel bumped to 2. p2 dispatched
+        // at seq=3. So p1's outcome is stale relative to the dispatcher's
+        // current view.
+        assert_eq!(p1_seq, 1);
+        assert_eq!(p2_seq, 3);
+        assert_eq!(d.current_seq(), 3);
+        assert_ne!(p1_seq, d.current_seq(), "p1 must read as stale");
+        assert_eq!(p2_seq, d.current_seq(), "p2 must read as fresh");
     }
 }
