@@ -36,6 +36,7 @@ fn main() -> io::Result<()> {
         Some(args.join(" "))
     };
 
+    init_logger();
     install_panic_hook();
     let mut terminal = setup_terminal()?;
     let result = run(&mut terminal, initial_query);
@@ -184,6 +185,36 @@ fn restore_terminal(terminal: &mut Term) -> io::Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, Show)?;
     Ok(())
+}
+
+/// Initialize a file logger so `log::warn!` calls (malformed yt-dlp
+/// entries, terminal-restore failures, etc.) actually land somewhere.
+/// Stderr would corrupt the TUI, so we write to a file under the
+/// platform cache dir. Best-effort: if anything fails (no cache dir,
+/// can't create the directory, can't open the file), we silently
+/// continue — `log::warn!` calls become no-ops in that case, but the
+/// TUI itself still works.
+fn init_logger() {
+    let Some(cache) = dirs::cache_dir() else {
+        return;
+    };
+    let log_dir = cache.join("yttui");
+    if std::fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
+    let log_path = log_dir.join("yttui.log");
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    else {
+        return;
+    };
+    let _ = simplelog::WriteLogger::init(
+        log::LevelFilter::Warn,
+        simplelog::Config::default(),
+        file,
+    );
 }
 
 /// Best-effort terminal restoration on panic so the user's shell isn't
