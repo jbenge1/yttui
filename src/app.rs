@@ -96,16 +96,6 @@ impl App {
         }
     }
 
-    /// Build an `App` that immediately fires a search for `query` (used
-    /// when the binary is invoked with positional args).
-    #[must_use]
-    pub fn with_initial_query(query: &str) -> (Self, Action) {
-        let mut app = Self::new();
-        app.input = query.to_string();
-        let action = app.commit_query();
-        (app, action)
-    }
-
     /// Drive the state machine with a single key event. Returns the
     /// side-effect the main loop should perform.
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
@@ -154,7 +144,9 @@ impl App {
         }
     }
 
-    fn commit_query(&mut self) -> Action {
+    /// Commit the current `input` as a search query and transition to
+    /// `Searching`. Trims whitespace; no-ops on empty input.
+    pub fn commit_query(&mut self) -> Action {
         let q = self.input.trim().to_string();
         if q.is_empty() {
             return Action::None;
@@ -727,8 +719,10 @@ mod tests {
     }
 
     #[test]
-    fn with_initial_query_starts_search_immediately() {
-        let (app, action) = App::with_initial_query("rust");
+    fn commit_query_from_input_starts_search() {
+        let mut app = App::new();
+        app.input = "rust".to_string();
+        let action = app.commit_query();
         assert_eq!(action, Action::StartSearch("rust".to_string()));
         assert_eq!(app.screen, Screen::Searching);
         assert_eq!(app.committed_query.as_deref(), Some("rust"));

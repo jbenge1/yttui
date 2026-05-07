@@ -5,6 +5,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
+use clap::Parser;
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, Event};
 use crossterm::execute;
@@ -16,12 +17,12 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
 use yttui::app::{Action, App};
+use yttui::cli::Cli;
 use yttui::player::{MpvPlayer, PlaybackOptions, play_result};
 use yttui::search::{
     SearchBackend, SearchError, SearchResult, SortOrder, YtDlpBackend,
 };
 
-const DEFAULT_RESULT_COUNT: u32 = 20;
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
@@ -33,13 +34,9 @@ struct PendingSearch {
 }
 
 fn main() -> io::Result<()> {
-    // Parse positional args naively — full clap CLI lands in slice 5.
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let initial_query = if args.is_empty() {
-        None
-    } else {
-        Some(args.join(" "))
-    };
+    // clap exits with help/version/validation errors on its own, so this
+    // call either returns or terminates the process for us.
+    let cli = Cli::parse();
 
     if let Err(e) = yttui::preflight::check() {
         eprintln!("yttui: {e}");
@@ -48,7 +45,7 @@ fn main() -> io::Result<()> {
     init_logger();
     install_panic_hook();
     let mut terminal = setup_terminal()?;
-    let result = run(&mut terminal, initial_query);
+    let result = run(&mut terminal, &cli);
     restore_terminal(&mut terminal)?;
     if let Err(e) = &result {
         eprintln!("yttui: {e}");
@@ -56,22 +53,26 @@ fn main() -> io::Result<()> {
     result
 }
 
-fn run(terminal: &mut Term, initial_query: Option<String>) -> io::Result<()> {
+fn run(terminal: &mut Term, cli: &Cli) -> io::Result<()> {
     let backend = YtDlpBackend::default();
     let player = MpvPlayer::default();
-    let opts = PlaybackOptions::default();
+    let opts = PlaybackOptions::default().with_audio_only(cli.audio_only);
 
     let mut app = App::new();
     let mut pending_search: Option<PendingSearch> = None;
     let search_seq = Arc::new(AtomicU64::new(0));
 
     // If we got an initial query on the CLI, fire it immediately.
-    if let Some(q) = initial_query {
-        let (state, action) = App::with_initial_query(&q);
-        app = state;
-        if let Action::StartSearch(query) = action {
-            pending_search =
-                Some(spawn_search(&backend, &search_seq, query, false));
+    if let Some(q) = cli.initial_query() {
+        app.input = q;
+        if let Action::StartSearch(query) = app.commit_query() {
+            pending_search = Some(spawn_search(
+                &backend,
+                &search_seq,
+                query,
+                cli.count,
+                cli.recent,
+            ));
         }
     }
 
@@ -121,13 +122,23 @@ fn run(terminal: &mut Term, initial_query: Option<String>) -> io::Result<()> {
             Action::None => {}
             Action::Quit => return Ok(()),
             Action::StartSearch(q) => {
-                pending_search =
-                    Some(spawn_search(&backend, &search_seq, q, false));
+                pending_search = Some(spawn_search(
+                    &backend,
+                    &search_seq,
+                    q,
+                    cli.count,
+                    cli.recent,
+                ));
             }
             Action::Rerun => {
                 if let Some(q) = app.committed_query.clone() {
-                    pending_search =
-                        Some(spawn_search(&backend, &search_seq, q, false));
+                    pending_search = Some(spawn_search(
+                        &backend,
+                        &search_seq,
+                        q,
+                        cli.count,
+                        cli.recent,
+                    ));
                 }
             }
             Action::CancelSearch => {
@@ -154,6 +165,7 @@ fn spawn_search(
     backend: &YtDlpBackend,
     seq: &Arc<AtomicU64>,
     query: String,
+    count: u32,
     recent: bool,
 ) -> PendingSearch {
     let (tx, rx) = mpsc::channel();
@@ -167,8 +179,7 @@ fn spawn_search(
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_clone = cancel.clone();
     thread::spawn(move || {
-        let outcome =
-            backend.search(&query, DEFAULT_RESULT_COUNT, sort, &cancel_clone);
+        let outcome = backend.search(&query, count, sort, &cancel_clone);
         // Best-effort send; receiver may be gone if the user moved on.
         let _ = tx.send((this_seq, outcome));
     });

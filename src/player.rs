@@ -12,6 +12,17 @@ pub struct PlaybackOptions {
     pub audio_only: bool,
 }
 
+impl PlaybackOptions {
+    /// Builder shorthand: start from defaults and toggle `audio_only`.
+    /// Needed because `#[non_exhaustive]` forbids struct-literal
+    /// construction from outside the crate.
+    #[must_use]
+    pub fn with_audio_only(mut self, audio_only: bool) -> Self {
+        self.audio_only = audio_only;
+        self
+    }
+}
+
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PlayerError {
