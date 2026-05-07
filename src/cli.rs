@@ -39,15 +39,19 @@ pub const LONG_VERSION: &str = concat!(
                   Vim-keyed list, no Invidious dependency, no telemetry."
 )]
 pub struct Cli {
-    /// Print version information and exit.
-    ///
-    /// Note on the `-v` alias: this is a **one-way door**. Most Unix
-    /// tools reserve `-v` for verbose output; we hand it to `--version`
-    /// (pacman-style) for parity with the user's mental model. If a
-    /// future verbosity flag lands, it'll need a different short
-    /// (`-d` for debug, `-q` for quiet, etc.) — reclaiming `-v` would
-    /// break users who learned `yttui -v`.
-    #[arg(short = 'V', short_alias = 'v', long = "version")]
+    // Note on the `-v` alias: this is a one-way door. Most Unix tools
+    // reserve `-v` for verbose output; we hand it to `--version` (pacman-
+    // style) for parity with the user's mental model. If a future
+    // verbosity flag lands, it'll need a different short (`-d` for debug,
+    // `-q` for quiet, etc.) — reclaiming `-v` would break users who
+    // learned `yttui -v`. Kept as a `//` comment so the rationale stays
+    // with the code without leaking into `--help`.
+    #[arg(
+        short = 'V',
+        short_alias = 'v',
+        long = "version",
+        help = "Print version information and exit"
+    )]
     pub version: bool,
 
     /// Initial search query. Multi-word queries are joined with spaces.

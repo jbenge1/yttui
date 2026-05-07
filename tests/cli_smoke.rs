@@ -56,6 +56,20 @@ fn help_flag_prints_usage_and_exits_zero() {
 }
 
 #[test]
+fn help_does_not_leak_internal_rationale_about_v_alias() {
+    // The `-v`-as-`--version` rationale is a note for future maintainers,
+    // not end users. It must not appear in --help output.
+    Command::cargo_bin("yttui")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("one-way door").not())
+        .stdout(predicate::str::contains("pacman-style").not())
+        .stdout(predicate::str::contains("future verbosity").not());
+}
+
+#[test]
 fn count_below_minimum_is_rejected() {
     Command::cargo_bin("yttui")
         .unwrap()
