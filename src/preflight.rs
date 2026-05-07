@@ -10,33 +10,66 @@
 //! launch it from a terminal so the shell's `$PATH` applies. This will
 //! be documented in the README before V1 ships.
 
+use std::fmt;
+
 use thiserror::Error;
+
+/// One missing binary, with its install hint. Bundled into
+/// [`PreflightError::Missing`] so a single launch can report every
+/// dependency at once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingBinary {
+    pub name: &'static str,
+    pub instructions: &'static str,
+}
+
+impl fmt::Display for MissingBinary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "required binary not found in PATH: {}\n\n{}",
+            self.name, self.instructions
+        )
+    }
+}
 
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PreflightError {
-    #[error("required binary not found in PATH: {name}\n\n{instructions}")]
-    Missing {
-        name: &'static str,
-        instructions: &'static str,
-    },
+    /// One or more required binaries are missing. Reported together so
+    /// the user fixes their environment in a single pass instead of
+    /// `install → relaunch → install → relaunch`.
+    #[error("{}", format_missing(.0))]
+    Missing(Vec<MissingBinary>),
+}
+
+fn format_missing(missing: &[MissingBinary]) -> String {
+    missing
+        .iter()
+        .map(MissingBinary::to_string)
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Check that all binaries the TUI relies on are present.
 ///
 /// # Errors
-/// Returns the first missing binary as a [`PreflightError::Missing`].
+/// Returns [`PreflightError::Missing`] containing every missing binary
+/// (not just the first), so the user can install them all in one pass.
 pub fn check() -> Result<(), PreflightError> {
-    require("yt-dlp")?;
-    require("mpv")?;
-    Ok(())
-}
-
-fn require(name: &'static str) -> Result<(), PreflightError> {
-    which::which(name).map(|_| ()).map_err(|_| PreflightError::Missing {
-        name,
-        instructions: install_instructions(name),
-    })
+    let missing: Vec<MissingBinary> = ["yt-dlp", "mpv"]
+        .into_iter()
+        .filter(|name| which::which(name).is_err())
+        .map(|name| MissingBinary {
+            name,
+            instructions: install_instructions(name),
+        })
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(PreflightError::Missing(missing))
+    }
 }
 
 #[must_use]
@@ -83,21 +116,35 @@ mod tests {
     }
 
     #[test]
-    fn require_succeeds_for_a_known_unix_binary() {
-        // `ls` is on every Unix and every CI runner — testing the
-        // success branch in isolation, decoupled from whether yt-dlp is
-        // preinstalled on the runner.
-        require("ls").unwrap();
+    fn missing_binary_display_includes_name_and_instructions() {
+        let mb = MissingBinary {
+            name: "yt-dlp",
+            instructions: install_instructions("yt-dlp"),
+        };
+        let s = mb.to_string();
+        assert!(s.contains("yt-dlp"));
+        assert!(s.contains("brew install yt-dlp"));
     }
 
     #[test]
-    fn require_fails_for_unknown_binary() {
-        let err = require("absolutely-no-such-binary-zzz").unwrap_err();
-        match err {
-            PreflightError::Missing { name, instructions } => {
-                assert_eq!(name, "absolutely-no-such-binary-zzz");
-                assert!(instructions.contains("README"));
-            }
-        }
+    fn preflight_error_lists_every_missing_binary() {
+        // The whole point of this slice: a user with neither tool
+        // installed should see both reports in one launch, not "install
+        // yt-dlp" → reinstall → "install mpv".
+        let err = PreflightError::Missing(vec![
+            MissingBinary {
+                name: "yt-dlp",
+                instructions: install_instructions("yt-dlp"),
+            },
+            MissingBinary {
+                name: "mpv",
+                instructions: install_instructions("mpv"),
+            },
+        ]);
+        let s = err.to_string();
+        assert!(s.contains("yt-dlp"), "missing yt-dlp section: {s}");
+        assert!(s.contains("mpv"), "missing mpv section: {s}");
+        assert!(s.contains("brew install yt-dlp"));
+        assert!(s.contains("brew install mpv"));
     }
 }

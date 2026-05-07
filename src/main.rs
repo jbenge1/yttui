@@ -24,14 +24,14 @@ const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
-fn main() -> io::Result<()> {
+fn main() {
     // clap exits with help/validation errors on its own; we handle
     // `--version` ourselves to print LONG_VERSION cleanly (no auto-prefix).
     let cli = Cli::parse();
 
     if cli.version {
         print!("{}", yttui::cli::LONG_VERSION);
-        return Ok(());
+        return;
     }
 
     if let Err(e) = yttui::preflight::check() {
@@ -40,13 +40,25 @@ fn main() -> io::Result<()> {
     }
     init_logger();
     install_panic_hook();
-    let mut terminal = setup_terminal()?;
-    let result = run(&mut terminal, &cli);
-    restore_terminal(&mut terminal)?;
-    if let Err(e) = &result {
+    // Setup/restore/run errors must surface with the same `yttui:`
+    // prefix everywhere. Returning `Err(_)` from `main` would route
+    // through `Termination::report`, which double-prints a debug-format
+    // `Error: Os { … }`. Exit explicitly instead.
+    let mut terminal = match setup_terminal() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("yttui: {e}");
+            std::process::exit(1);
+        }
+    };
+    let run_result = run(&mut terminal, &cli);
+    let restore_result = restore_terminal(&mut terminal);
+
+    let final_err = run_result.err().or(restore_result.err());
+    if let Some(e) = final_err {
         eprintln!("yttui: {e}");
+        std::process::exit(1);
     }
-    result
 }
 
 fn run(terminal: &mut Term, cli: &Cli) -> io::Result<()> {

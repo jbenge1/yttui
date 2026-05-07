@@ -90,6 +90,36 @@ fn count_above_maximum_is_rejected() {
 }
 
 #[test]
+fn non_tty_setup_failure_uses_yttui_prefix_not_debug_format() {
+    // Repro from second-opinion review: `yttui </dev/null` was emitting
+    // `Error: Os { code: 6, … }` (Termination::report's debug print)
+    // instead of the user-friendly `yttui: <message>` we use everywhere
+    // else. assert_cmd already runs the child without a controlling
+    // terminal, so the setup_terminal path that needs a TTY blows up
+    // for any reason and we get to assert on the prefix.
+    //
+    // Why a query rather than `--version`: --version exits before
+    // setup_terminal. We need to actually reach terminal setup. The
+    // preflight may fail first if yt-dlp/mpv aren't installed on the CI
+    // runner, but that's also `yttui:`-prefixed, so the assertion holds.
+    let assert = Command::cargo_bin("yttui")
+        .unwrap()
+        .arg("rust")
+        .write_stdin("")
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("yttui:"),
+        "expected `yttui:` prefix in stderr, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Error: Os {"),
+        "debug-formatted Error leaked through: {stderr}"
+    );
+}
+
+#[test]
 fn unknown_flag_is_rejected() {
     Command::cargo_bin("yttui")
         .unwrap()
