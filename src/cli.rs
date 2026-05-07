@@ -10,15 +10,39 @@ pub const DEFAULT_COUNT: u32 = 20;
 /// this, and the TUI list is paginated by viewport, not by count.
 pub const MAX_COUNT: u32 = 100;
 
+/// Long-form `--version` output. Pacman-style: small ASCII mark on the
+/// left, version + author + license on the right.
+pub const LONG_VERSION: &str = concat!(
+    "   ▶\n",
+    "   ▶▶\n",
+    "   ▶▶▶          yttui v",
+    env!("CARGO_PKG_VERSION"),
+    "\n",
+    "   ▶▶▶▶         Keyboard-driven YouTube TUI\n",
+    "   ▶▶▶\n",
+    "   ▶▶           Copyright (C) 2026 Justin Benge\n",
+    "   ▶            Released under the MIT License.\n",
+    "\n",
+    "                Powered by yt-dlp + mpv + ratatui.\n",
+    "                No telemetry. No Invidious. No comments.\n",
+);
+
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "yttui",
-    version,
+    // Disable clap's auto-version flag so we can print LONG_VERSION
+    // directly (without clap's "yttui " prefix on the first line) and
+    // accept both `-V` and `-v` as aliases.
+    disable_version_flag = true,
     about = "Keyboard-driven YouTube TUI",
     long_about = "Search YouTube and play results via mpv. \
                   Vim-keyed list, no Invidious dependency, no telemetry."
 )]
 pub struct Cli {
+    /// Print version information and exit.
+    #[arg(short = 'V', short_alias = 'v', long = "version")]
+    pub version: bool,
+
     /// Initial search query. Multi-word queries are joined with spaces.
     /// Omit to land on the empty prompt.
     pub query: Vec<String>,
@@ -108,6 +132,16 @@ mod tests {
     fn count_above_max_is_rejected() {
         let err = parse(&["--count", "101"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn count_at_lower_boundary_accepted() {
+        assert_eq!(parse(&["--count", "1"]).unwrap().count, 1);
+    }
+
+    #[test]
+    fn count_at_upper_boundary_accepted() {
+        assert_eq!(parse(&["--count", "100"]).unwrap().count, MAX_COUNT);
     }
 
     #[test]

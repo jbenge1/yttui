@@ -277,8 +277,16 @@ pub fn parse_results(json: &[u8]) -> Result<Vec<SearchResult>, SearchError> {
 }
 
 fn entry_to_result(entry: &serde_json::Value) -> Option<SearchResult> {
-    let id = entry.get("id")?.as_str()?.to_string();
-    let title = entry.get("title")?.as_str()?.to_string();
+    let id = entry
+        .get("id")?
+        .as_str()
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let title = entry
+        .get("title")?
+        .as_str()
+        .filter(|s| !s.is_empty())?
+        .to_string();
     let channel = entry
         .get("channel")
         .and_then(serde_json::Value::as_str)
@@ -303,8 +311,11 @@ fn parse_duration(entry: &serde_json::Value) -> VideoDuration {
     }
     match entry.get("duration").and_then(serde_json::Value::as_f64) {
         Some(d) if d.is_finite() && d >= 0.0 => {
-            // Cap at u64::MAX worth of seconds — anything larger is bogus,
-            // but we've already validated finite + non-negative above.
+            // `as u64` is saturating since Rust 1.45: finite values above
+            // `u64::MAX` (≈1.8e19, ≈584 billion years) collapse to
+            // `u64::MAX`. Validated finite + non-negative above; the
+            // saturating top-end is the remaining theoretical case and
+            // is fine for our purposes (no real video runs that long).
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let secs = d as u64;
             VideoDuration::Seconds(secs)
@@ -563,6 +574,40 @@ mod tests {
     fn ytsearch_prefix_changes_with_sort() {
         assert_eq!(SortOrder::Relevance.ytsearch_prefix(), "ytsearch");
         assert_eq!(SortOrder::Date.ytsearch_prefix(), "ytsearchdate");
+    }
+
+    #[test]
+    fn non_zero_exit_is_classified() {
+        // `false` always exits non-zero (1 on macOS/Linux). Doesn't read
+        // its args, so the constructed `--flat-playlist -J ytsearch1:…`
+        // is harmlessly ignored.
+        let backend = YtDlpBackend {
+            timeout: StdDuration::from_secs(5),
+            binary: PathBuf::from("false"),
+        };
+        let err = backend
+            .run_raw("anything", 1, SortOrder::Relevance)
+            .unwrap_err();
+        match err {
+            SearchError::NonZeroExit { status, .. } => {
+                assert_ne!(status, 0);
+            }
+            other => panic!("expected NonZeroExit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_id_or_title_strings_are_skipped() {
+        let json = br#"{
+            "entries": [
+                {"id": "", "title": "Has empty id"},
+                {"id": "good1", "title": ""},
+                {"id": "good2", "title": "Has both"}
+            ]
+        }"#;
+        let r = parse_results(json).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].id, "good2");
     }
 
     #[test]

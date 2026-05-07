@@ -1,8 +1,6 @@
 use std::io::{self, Stdout};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::thread;
+use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
 use clap::Parser;
@@ -18,25 +16,23 @@ use ratatui::backend::CrosstermBackend;
 
 use yttui::app::{Action, App};
 use yttui::cli::Cli;
+use yttui::dispatcher::{PendingSearch, SearchDispatcher};
 use yttui::player::{MpvPlayer, PlaybackOptions, play_result};
-use yttui::search::{
-    SearchBackend, SearchError, SearchResult, SortOrder, YtDlpBackend,
-};
+use yttui::search::{SearchError, SearchResult, YtDlpBackend};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
-type SearchOutcome = (u64, Result<Vec<SearchResult>, SearchError>);
-
-struct PendingSearch {
-    rx: Receiver<SearchOutcome>,
-    cancel: Arc<AtomicBool>,
-}
 
 fn main() -> io::Result<()> {
-    // clap exits with help/version/validation errors on its own, so this
-    // call either returns or terminates the process for us.
+    // clap exits with help/validation errors on its own; we handle
+    // `--version` ourselves to print LONG_VERSION cleanly (no auto-prefix).
     let cli = Cli::parse();
+
+    if cli.version {
+        print!("{}", yttui::cli::LONG_VERSION);
+        return Ok(());
+    }
 
     if let Err(e) = yttui::preflight::check() {
         eprintln!("yttui: {e}");
@@ -54,25 +50,19 @@ fn main() -> io::Result<()> {
 }
 
 fn run(terminal: &mut Term, cli: &Cli) -> io::Result<()> {
-    let backend = YtDlpBackend::default();
+    let dispatcher = SearchDispatcher::new(YtDlpBackend::default());
     let player = MpvPlayer::default();
     let opts = PlaybackOptions::default().with_audio_only(cli.audio_only);
 
     let mut app = App::new();
     let mut pending_search: Option<PendingSearch> = None;
-    let search_seq = Arc::new(AtomicU64::new(0));
 
     // If we got an initial query on the CLI, fire it immediately.
     if let Some(q) = cli.initial_query() {
         app.input = q;
         if let Action::StartSearch(query) = app.commit_query() {
-            pending_search = Some(spawn_search(
-                &backend,
-                &search_seq,
-                query,
-                cli.count,
-                cli.recent,
-            ));
+            pending_search =
+                Some(dispatcher.dispatch(query, cli.count, cli.recent));
         }
     }
 
@@ -83,8 +73,7 @@ fn run(terminal: &mut Term, cli: &Cli) -> io::Result<()> {
         if let Some(p) = &pending_search {
             match p.rx.try_recv() {
                 Ok((seq, outcome)) => {
-                    let current = search_seq.load(Ordering::SeqCst);
-                    if seq == current {
+                    if seq == dispatcher.current_seq() {
                         // Note: `SearchError::Cancelled` is unreachable
                         // here in practice — `Action::CancelSearch` drops
                         // `pending_search` before the worker can send,
@@ -122,33 +111,19 @@ fn run(terminal: &mut Term, cli: &Cli) -> io::Result<()> {
             Action::None => {}
             Action::Quit => return Ok(()),
             Action::StartSearch(q) => {
-                pending_search = Some(spawn_search(
-                    &backend,
-                    &search_seq,
-                    q,
-                    cli.count,
-                    cli.recent,
-                ));
+                pending_search =
+                    Some(dispatcher.dispatch(q, cli.count, cli.recent));
             }
             Action::Rerun => {
                 if let Some(q) = app.committed_query.clone() {
-                    pending_search = Some(spawn_search(
-                        &backend,
-                        &search_seq,
-                        q,
-                        cli.count,
-                        cli.recent,
-                    ));
+                    pending_search =
+                        Some(dispatcher.dispatch(q, cli.count, cli.recent));
                 }
             }
             Action::CancelSearch => {
-                // Trip the cancel flag so the worker actively kills the
-                // yt-dlp process group, then bump the seq counter so
-                // any result already in flight is discarded.
                 if let Some(p) = &pending_search {
-                    p.cancel.store(true, Ordering::SeqCst);
+                    dispatcher.cancel(p);
                 }
-                search_seq.fetch_add(1, Ordering::SeqCst);
                 pending_search = None;
             }
             Action::Play(result) => {
@@ -159,31 +134,6 @@ fn run(terminal: &mut Term, cli: &Cli) -> io::Result<()> {
             }
         }
     }
-}
-
-fn spawn_search(
-    backend: &YtDlpBackend,
-    seq: &Arc<AtomicU64>,
-    query: String,
-    count: u32,
-    recent: bool,
-) -> PendingSearch {
-    let (tx, rx) = mpsc::channel();
-    let backend = backend.clone();
-    let this_seq = seq.fetch_add(1, Ordering::SeqCst) + 1;
-    let sort = if recent {
-        SortOrder::Date
-    } else {
-        SortOrder::Relevance
-    };
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_clone = cancel.clone();
-    thread::spawn(move || {
-        let outcome = backend.search(&query, count, sort, &cancel_clone);
-        // Best-effort send; receiver may be gone if the user moved on.
-        let _ = tx.send((this_seq, outcome));
-    });
-    PendingSearch { rx, cancel }
 }
 
 fn play_with_swap(

@@ -251,8 +251,9 @@ fn render_row(r: &SearchResult, width: u16) -> ListItem<'static> {
 }
 
 /// Truncate `s` to fit within `max_cols` display columns, adding a
-/// single-character ellipsis if truncated. Falls back to byte-wise if
-/// the budget is tiny.
+/// single-character ellipsis if truncated. Returns an empty string when
+/// `max_cols == 0`. Respects unicode display width (CJK chars are
+/// 2 cols).
 fn truncate_to_width(s: &str, max_cols: u16) -> String {
     let max = usize::from(max_cols);
     if s.width() <= max {
@@ -367,4 +368,94 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         ])
         .split(v[1]);
     h[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_passes_through_when_fits() {
+        assert_eq!(truncate_to_width("abc", 5), "abc");
+    }
+
+    #[test]
+    fn truncate_passes_through_at_exact_fit() {
+        assert_eq!(truncate_to_width("abc", 3), "abc");
+    }
+
+    #[test]
+    fn truncate_adds_ellipsis_when_clipped() {
+        // Budget 3: 2 chars + ellipsis = 3 cols.
+        assert_eq!(truncate_to_width("abcde", 3), "ab…");
+    }
+
+    #[test]
+    fn truncate_budget_zero_returns_empty() {
+        assert_eq!(truncate_to_width("abc", 0), "");
+        assert_eq!(truncate_to_width("", 0), "");
+    }
+
+    #[test]
+    fn truncate_budget_one_returns_just_ellipsis() {
+        // Budget 1: nothing fits before the ellipsis (max-1 = 0).
+        assert_eq!(truncate_to_width("abc", 1), "…");
+    }
+
+    #[test]
+    fn truncate_respects_unicode_width() {
+        // Each CJK char is 2 cols; "あいう" = 6 cols.
+        // Budget 4: max-1 = 3, "あ" (2 cols) fits, "い" (2 cols) doesn't
+        // (2+2 > 3), so we stop. Output: "あ…" = 3 cols.
+        assert_eq!(truncate_to_width("あいう", 4), "あ…");
+    }
+
+    #[test]
+    fn truncate_handles_empty_string() {
+        assert_eq!(truncate_to_width("", 10), "");
+    }
+
+    #[test]
+    fn centered_rect_at_50_pct_is_centered() {
+        let r = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let c = centered_rect(50, 50, r);
+        assert_eq!(c.width, 50);
+        assert_eq!(c.height, 50);
+        assert_eq!(c.x, 25);
+        assert_eq!(c.y, 25);
+    }
+
+    #[test]
+    fn centered_rect_at_99_pct_has_zero_margins() {
+        // (100-99)/2 = 0 → margins of 0/99/0. Edge case worth pinning.
+        let r = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let c = centered_rect(99, 99, r);
+        assert_eq!(c.width, 99);
+        assert_eq!(c.height, 99);
+        assert_eq!(c.x, 0);
+        assert_eq!(c.y, 0);
+    }
+
+    #[test]
+    fn centered_rect_at_100_pct_fills() {
+        let r = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let c = centered_rect(100, 100, r);
+        assert_eq!(c.width, 100);
+        assert_eq!(c.height, 100);
+    }
 }

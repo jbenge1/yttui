@@ -3,6 +3,12 @@ name = "yttui"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
+authors = ["Justin Benge <jbenge1@arizona.edu>"]
+description = "Keyboard-driven YouTube TUI: search via yt-dlp, play via mpv."
+license = "MIT"
+readme = "README.md"
+keywords = ["youtube", "tui", "ratatui", "yt-dlp", "mpv"]
+categories = ["command-line-utilities", "multimedia"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod dispatcher;
 pub mod player;
 pub mod preflight;
 pub mod search;
