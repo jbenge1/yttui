@@ -324,25 +324,6 @@ fn parse_duration(entry: &serde_json::Value) -> VideoDuration {
     }
 }
 
-#[must_use]
-pub fn format_duration(d: &VideoDuration) -> String {
-    match d {
-        VideoDuration::Live => "LIVE".to_string(),
-        VideoDuration::Upcoming => "UPCOMING".to_string(),
-        VideoDuration::Unknown => "—".to_string(),
-        VideoDuration::Seconds(s) => {
-            let h = s / 3600;
-            let m = (s % 3600) / 60;
-            let s = s % 60;
-            if h > 0 {
-                format!("{h}:{m:02}:{s:02}")
-            } else {
-                format!("{m}:{s:02}")
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,19 +460,7 @@ mod tests {
         assert!(r.iter().all(|x| x.duration == VideoDuration::Unknown));
     }
 
-    #[test]
-    fn formats_duration() {
-        assert_eq!(format_duration(&VideoDuration::Seconds(0)), "0:00");
-        assert_eq!(format_duration(&VideoDuration::Seconds(59)), "0:59");
-        assert_eq!(format_duration(&VideoDuration::Seconds(60)), "1:00");
-        assert_eq!(format_duration(&VideoDuration::Seconds(2404)), "40:04");
-        assert_eq!(format_duration(&VideoDuration::Seconds(3661)), "1:01:01");
-        assert_eq!(format_duration(&VideoDuration::Live), "LIVE");
-        assert_eq!(format_duration(&VideoDuration::Upcoming), "UPCOMING");
-        assert_eq!(format_duration(&VideoDuration::Unknown), "—");
-    }
-
-    /// Test double that constructs results directly — no JSON-shape
+/// Test double that constructs results directly — no JSON-shape
     /// duplication. The trait now returns `Vec<SearchResult>` so this
     /// fake doesn't need to know how `yt-dlp` formats its output.
     struct FakeBackend {

@@ -24,6 +24,10 @@ crossterm = "0.29"
 unicode-width = "0.2"
 clap = { version = "4", features = ["derive"] }
 
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+
 [profile.release]
 lto = true
 codegen-units = 1

@@ -1,10 +1,10 @@
 # yttui
 
-> ▶ Keyboard-driven YouTube TUI for terminals that take vim seriously.
+A keyboard-driven YouTube TUI. Search via [yt-dlp][], play via [mpv][],
+no Invidious, no comments.
 
-Search YouTube via [yt-dlp](https://github.com/yt-dlp/yt-dlp), play
-results via [mpv](https://mpv.io/). No Invidious dependency, no
-telemetry, no comments. Built in Rust on [ratatui](https://ratatui.rs/).
+<!-- Replace with the real demo asset once recorded — see "Recording the demo" below. -->
+![demo](docs/demo.gif)
 
 ## Features
 
@@ -12,41 +12,34 @@ telemetry, no comments. Built in Rust on [ratatui](https://ratatui.rs/).
 - Cancellable in-flight searches (Esc kills the `yt-dlp` process group)
 - Filter results live (`/`)
 - Re-run, new search, audio-only mode
-- Refuses to launch on upcoming livestreams (no mpv on a stream that
-  hasn't started)
-- Single static binary, ~1 MB. `--version` exits in ≈3 ms median on
-  Apple Silicon; the full TUI cold-start to first frame is well under
-  the spec's 200 ms target.
+- Refuses to launch on upcoming livestreams
+- Single static binary, ~1 MB
 
 ## Prerequisites
 
 | Tool | Why | Install |
 |---|---|---|
-| [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) | search + URL resolution | `brew install yt-dlp` |
-| [`mpv`](https://mpv.io/) | playback | `brew install mpv` |
+| [yt-dlp][] | search + URL resolution | `brew install yt-dlp` |
+| [mpv][] | playback | `brew install mpv` |
 
-`yttui` will refuse to start if either is missing, with a friendly
-message pointing you at the install command.
+`yttui` will refuse to start if either is missing and tell you how to
+install it.
 
 ## Install
 
-### From source (local)
+From source (after cloning):
 
 ```sh
-git clone <repo-url> yttui
-cd yttui
 cargo install --path .
 ```
 
-### From a Git remote
+From a Git remote:
 
 ```sh
 cargo install --git <repo-url>
 ```
 
-### Homebrew
-
-A formula isn't published yet. Build from source for now.
+A Homebrew formula isn't published yet. Build from source for now.
 
 ## Usage
 
@@ -56,8 +49,8 @@ yttui factorio mega bus            # immediate search
 yttui --recent rust                # sort by upload date
 yttui --count 50 vim               # 50 results (1..=100)
 yttui --audio-only "lofi hip hop"  # mpv with --no-video
-yttui --help                       # full flag reference
-yttui --version                    # version, author, license
+yttui --help
+yttui --version
 ```
 
 Inside the TUI:
@@ -75,9 +68,21 @@ Inside the TUI:
 | `?` | Help overlay (also shown inline on the prompt) |
 | `q` / `Esc` | Quit (or cancel current modal) |
 
-During playback, mpv takes the terminal; close mpv and you return to
-the result list. Esc on the searching screen cancels and kills the
+During playback, mpv takes the terminal; close mpv to return to the
+result list. Esc on the searching screen cancels and kills the
 `yt-dlp` subprocess.
+
+### Playback quality and subtitles
+
+mpv handles both. To cap quality or auto-load subtitles, configure mpv
+itself in `~/.config/mpv/mpv.conf`:
+
+```conf
+ytdl-format=bestvideo[height<=1080]+bestaudio/best
+ytdl-raw-options=write-subs=,write-auto-subs=,sub-lang="en"
+```
+
+During playback: `j` / `J` cycle subtitle tracks, `v` toggles visibility.
 
 ## Files
 
@@ -99,18 +104,33 @@ shell's `$PATH` applies.
 
 ## Privacy
 
-- `yt-dlp` talks to YouTube directly from your IP. No logged-in account.
-- Everything is local. No cloud sync, no telemetry, no analytics.
-- Logs are warning-level only and live entirely in the platform cache
-  dir. Delete them whenever.
+All state is local — no telemetry, no cloud sync. `yt-dlp` talks to
+YouTube directly from your IP. Logs (warning-level only) live in your
+platform cache dir; safe to delete.
 
 ## Status
 
-V1.0 — search, list, play, vim keybindings, cancellation, error
-recovery. See [`roadmap.md`](./roadmap.md) for V2 (thumbnails, watch
+V1.0. See [`roadmap.md`](./roadmap.md) for V2 (thumbnails, watch
 history, config) and V3 (subscription feed + personal recommendation
 engine).
+
+## Recording the demo
+
+The demo asset above is generated from a [vhs][] tape so it stays
+reproducible. To regenerate:
+
+```sh
+brew install vhs
+vhs docs/demo.tape    # produces docs/demo.gif
+```
+
+The tape file is `docs/demo.tape` — edit and re-run to update the
+visual.
 
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+[yt-dlp]: https://github.com/yt-dlp/yt-dlp
+[mpv]: https://mpv.io/
+[vhs]: https://github.com/charmbracelet/vhs

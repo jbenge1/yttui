@@ -1,7 +1,15 @@
-//! Application state machine. Pure logic — no rendering, no I/O.
+//! Application state machine. No rendering, no I/O — takes pre-parsed
+//! [`crossterm::event::KeyEvent`]s and returns the side-effect the
+//! main loop should perform as an [`Action`] value.
 //!
 //! The render layer reads `App` to draw, the main loop calls
 //! [`App::handle_key`] and acts on the returned [`Action`].
+//!
+//! Note: this module accepts `crossterm`'s `KeyEvent` directly rather
+//! than an internal key abstraction. That's a deliberate V1 trade —
+//! abstracting input prematurely would be ceremony with no callers.
+//! If yttui ever grows a non-crossterm input source, define a yttui-
+//! native `Key` type here and convert at the boundary in `main.rs`.
 
 use std::sync::Arc;
 

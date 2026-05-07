@@ -13,7 +13,7 @@ use ratatui::widgets::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, LastError, Screen};
-use crate::search::{SearchResult, format_duration};
+use crate::search::{SearchResult, VideoDuration};
 
 /// Minimum supported terminal dimensions (per V1 spec). Below this, we
 /// draw a "terminal too small" notice instead of a broken layout.
@@ -214,6 +214,29 @@ fn draw_results_body(frame: &mut Frame, inner: Rect, app: &App) {
     frame.render_stateful_widget(list, inner, &mut state);
 }
 
+/// Format a [`VideoDuration`] as a terse list-cell string.
+/// `1:23` / `1:01:01` for known seconds, `LIVE` / `UPCOMING` for live
+/// states, `—` for unknown. Display owns this — it's a rendering
+/// concern, not a yt-dlp adapter concern (see Betterfy #56).
+#[must_use]
+fn format_duration(d: &VideoDuration) -> String {
+    match d {
+        VideoDuration::Live => "LIVE".to_string(),
+        VideoDuration::Upcoming => "UPCOMING".to_string(),
+        VideoDuration::Unknown => "—".to_string(),
+        VideoDuration::Seconds(s) => {
+            let h = s / 3600;
+            let m = (s % 3600) / 60;
+            let s = s % 60;
+            if h > 0 {
+                format!("{h}:{m:02}:{s:02}")
+            } else {
+                format!("{m}:{s:02}")
+            }
+        }
+    }
+}
+
 /// Render one result row as `<title>     <channel>   <duration>` with the
 /// duration right-aligned. Truncates wide content based on terminal width.
 fn render_row(r: &SearchResult, width: u16) -> ListItem<'static> {
@@ -373,6 +396,21 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_duration_renders_each_variant() {
+        assert_eq!(format_duration(&VideoDuration::Seconds(0)), "0:00");
+        assert_eq!(format_duration(&VideoDuration::Seconds(59)), "0:59");
+        assert_eq!(format_duration(&VideoDuration::Seconds(60)), "1:00");
+        assert_eq!(format_duration(&VideoDuration::Seconds(2404)), "40:04");
+        assert_eq!(
+            format_duration(&VideoDuration::Seconds(3661)),
+            "1:01:01"
+        );
+        assert_eq!(format_duration(&VideoDuration::Live), "LIVE");
+        assert_eq!(format_duration(&VideoDuration::Upcoming), "UPCOMING");
+        assert_eq!(format_duration(&VideoDuration::Unknown), "—");
+    }
 
     #[test]
     fn truncate_passes_through_when_fits() {
