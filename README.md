@@ -3,7 +3,6 @@
 A keyboard-driven YouTube TUI. Search via [yt-dlp][], play via [mpv][],
 no Invidious, no comments.
 
-<!-- Replace with the real demo asset once recorded — see "Recording the demo" below. -->
 ![demo](docs/demo.gif)
 
 ## Features
