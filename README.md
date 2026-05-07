@@ -112,16 +112,32 @@ of orphaning them. The signal-watcher thread runs from process start
 to exit; manual verification:
 
 ```sh
-# Terminal A
+# Variant A: signal yttui from another terminal.
+# Terminal 1
 yttui rust ratatui          # search, then Enter on a result
-# Terminal B (while mpv is playing)
+# Terminal 2 (while mpv is playing)
 kill -INT $(pgrep -x yttui) # or `kill -TERM …`
+sleep 0.2                   # let the watcher kill mpv asynchronously
 pgrep mpv                   # should print nothing
 ```
 
-`SIGKILL` (`kill -9`) is uninterceptable — it bypasses the watcher
-and will leak `mpv`. That's a kernel limitation, not something
-`yttui` can fix.
+```sh
+# Variant B: literal Ctrl-C at yttui's terminal during playback.
+# This is the user-facing path the orphan-prevention guarantee
+# exists for; Variant A is *almost* equivalent because yttui keeps
+# foreground (it doesn't tcsetpgrp to mpv), but exercising the
+# real Ctrl-C is the spec-cited shape.
+yttui rust ratatui          # search, then Enter on a result
+# While mpv is playing, focus yttui's terminal and press Ctrl-C.
+sleep 0.2
+pgrep mpv                   # should print nothing
+```
+
+A second `Ctrl-C` arriving while the watcher is still running its
+cleanup escalates: the process exits immediately, matching POSIX
+shell convention. `SIGKILL` (`kill -9`) is uninterceptable — it
+bypasses the watcher and will leak `mpv`. That's a kernel
+limitation, not something `yttui` can fix.
 
 ## Privacy
 
