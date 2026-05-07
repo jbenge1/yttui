@@ -7,7 +7,25 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
+use thiserror::Error;
+
 use crate::search::{SearchBackend, SearchError, SearchResult, SortOrder};
+
+/// Errors surfaced by the dispatcher to the main loop. Distinct from
+/// [`SearchError`] because some failure modes (e.g. the worker thread
+/// panicking before producing any outcome) are dispatch-layer concerns
+/// the backend cannot itself construct.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum DispatchError {
+    /// The backend itself returned an error.
+    #[error(transparent)]
+    Search(#[from] SearchError),
+    /// The worker thread dropped its sender without producing an
+    /// outcome — i.e. the backend closure panicked.
+    #[error("search worker thread crashed before producing a result")]
+    WorkerPanicked,
+}
 
 pub type SearchOutcome = (u64, Result<Vec<SearchResult>, SearchError>);
 
@@ -142,6 +160,24 @@ mod tests {
                 duration: VideoDuration::Seconds(0),
             }])
         }
+    }
+
+    #[test]
+    fn dispatch_error_wraps_search_error_via_from() {
+        // Sanity: any `SearchError` lifts cleanly into `DispatchError`
+        // through the `#[from]` bridge so call sites don't need
+        // bespoke conversion.
+        let se = SearchError::Cancelled;
+        let de: DispatchError = se.into();
+        assert!(matches!(de, DispatchError::Search(SearchError::Cancelled)));
+    }
+
+    #[test]
+    fn dispatch_error_worker_panicked_renders_a_useful_message() {
+        let de = DispatchError::WorkerPanicked;
+        let s = de.to_string();
+        assert!(s.contains("worker"));
+        assert!(s.contains("crashed") || s.contains("panic"));
     }
 
     #[test]

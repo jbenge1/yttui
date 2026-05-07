@@ -15,8 +15,9 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::dispatcher::DispatchError;
 use crate::player::PlayerError;
-use crate::search::{SearchError, SearchResult};
+use crate::search::SearchResult;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Screen {
@@ -31,7 +32,7 @@ pub enum Screen {
 /// the library types stay non-`Clone`; the TUI wraps in `Arc`.
 #[derive(Debug, Clone)]
 pub enum LastError {
-    Search(Arc<SearchError>),
+    Search(Arc<DispatchError>),
     Player(Arc<PlayerError>),
 }
 
@@ -327,7 +328,7 @@ impl App {
         self.screen = Screen::Results;
     }
 
-    pub fn set_search_error(&mut self, err: Arc<SearchError>) {
+    pub fn set_search_error(&mut self, err: Arc<DispatchError>) {
         self.last_error = Some(LastError::Search(err));
         if self.results.is_empty() {
             // First search failed; bounce to Prompt so the user can fix
@@ -365,7 +366,7 @@ fn matches_filter(r: &SearchResult, needle: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::VideoDuration;
+    use crate::search::{SearchError, VideoDuration};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -689,14 +690,18 @@ mod tests {
         assert_eq!(app.selected, 0);
     }
 
+    fn timeout_dispatch_error() -> Arc<DispatchError> {
+        Arc::new(DispatchError::Search(SearchError::Timeout(
+            std::time::Duration::from_secs(30),
+        )))
+    }
+
     #[test]
     fn set_search_error_returns_to_prompt_when_no_prior_results() {
         let mut app = App::new();
         app.committed_query = Some("rust".to_string());
         app.screen = Screen::Searching;
-        app.set_search_error(Arc::new(SearchError::Timeout(
-            std::time::Duration::from_secs(30),
-        )));
+        app.set_search_error(timeout_dispatch_error());
         assert_eq!(app.screen, Screen::Prompt);
         assert_eq!(app.input, "rust");
         assert!(app.last_error.is_some());
@@ -707,9 +712,7 @@ mod tests {
         let mut app = results_app();
         let original_count = app.results.len();
         app.screen = Screen::Searching; // mid-rerun
-        app.set_search_error(Arc::new(SearchError::Timeout(
-            std::time::Duration::from_secs(30),
-        )));
+        app.set_search_error(timeout_dispatch_error());
         assert_eq!(app.screen, Screen::Results);
         assert_eq!(app.results.len(), original_count);
         assert!(app.last_error.is_some());
@@ -718,10 +721,7 @@ mod tests {
     #[test]
     fn keypress_clears_last_error() {
         let mut app = App::new();
-        app.last_error =
-            Some(LastError::Search(Arc::new(SearchError::Timeout(
-                std::time::Duration::from_secs(30),
-            ))));
+        app.last_error = Some(LastError::Search(timeout_dispatch_error()));
         app.handle_key(key(KeyCode::Char('a')));
         assert!(app.last_error.is_none());
     }

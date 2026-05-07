@@ -16,9 +16,9 @@ use ratatui::backend::CrosstermBackend;
 
 use yttui::app::{Action, App};
 use yttui::cli::Cli;
-use yttui::dispatcher::{PendingSearch, SearchDispatcher};
+use yttui::dispatcher::{DispatchError, PendingSearch, SearchDispatcher};
 use yttui::player::{MpvPlayer, PlaybackOptions, play_result};
-use yttui::search::{SearchError, SearchResult, YtDlpBackend};
+use yttui::search::{SearchResult, YtDlpBackend};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -80,7 +80,9 @@ fn run(terminal: &mut Term, cli: &Cli) -> io::Result<()> {
                         // so the outcome is discarded by the channel.
                         match outcome {
                             Ok(results) => app.set_results(results),
-                            Err(e) => app.set_search_error(Arc::new(e)),
+                            Err(e) => app.set_search_error(Arc::new(
+                                DispatchError::Search(e),
+                            )),
                         }
                     }
                     pending_search = None;
@@ -90,7 +92,9 @@ fn run(terminal: &mut Term, cli: &Cli) -> io::Result<()> {
                     // The worker dropped its sender without sending —
                     // i.e. the closure panicked. Surface this so the
                     // user doesn't see a perma-spinner.
-                    app.set_search_error(Arc::new(SearchError::WorkerPanicked));
+                    app.set_search_error(Arc::new(
+                        DispatchError::WorkerPanicked,
+                    ));
                     pending_search = None;
                 }
             }

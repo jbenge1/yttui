@@ -86,8 +86,6 @@ pub enum SearchError {
     Read(#[source] std::io::Error),
     #[error("yt-dlp output reader thread panicked")]
     ReaderPanicked,
-    #[error("search worker thread crashed before producing a result")]
-    WorkerPanicked,
     #[error("yt-dlp exited with status {status}: {stderr}")]
     NonZeroExit { status: i32, stderr: String },
     #[error("yt-dlp timed out after {0:?}")]
