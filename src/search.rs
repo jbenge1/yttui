@@ -89,17 +89,18 @@ pub enum SearchError {
 }
 
 pub trait SearchBackend {
-    /// Run a search and return the raw JSON bytes from the backend.
+    /// Run a search and return parsed [`SearchResult`]s.
     ///
     /// # Errors
     /// Returns [`SearchError`] if the backend cannot be invoked, exits
-    /// non-zero, exceeds its timeout, or its output cannot be read.
-    fn run(
+    /// non-zero, exceeds its timeout, its output cannot be read, or
+    /// its output cannot be parsed.
+    fn search(
         &self,
         query: &str,
         count: u32,
         sort: SortOrder,
-    ) -> Result<Vec<u8>, SearchError>;
+    ) -> Result<Vec<SearchResult>, SearchError>;
 }
 
 #[derive(Debug, Clone)]
@@ -117,8 +118,12 @@ impl Default for YtDlpBackend {
     }
 }
 
-impl SearchBackend for YtDlpBackend {
-    fn run(
+impl YtDlpBackend {
+    /// Spawn `yt-dlp` and return its raw stdout bytes. Internal helper
+    /// for [`SearchBackend::search`]; exposed at module scope so tests
+    /// can exercise the subprocess-handling path independently of
+    /// parsing.
+    fn run_raw(
         &self,
         query: &str,
         count: u32,
@@ -184,19 +189,16 @@ impl SearchBackend for YtDlpBackend {
     }
 }
 
-/// Convenience: run the backend and parse its output into [`SearchResult`]s.
-///
-/// # Errors
-/// Returns [`SearchError`] from the backend, or [`SearchError::InvalidJson`]
-/// if the backend's output cannot be parsed.
-pub fn search<B: SearchBackend>(
-    backend: &B,
-    query: &str,
-    count: u32,
-    sort: SortOrder,
-) -> Result<Vec<SearchResult>, SearchError> {
-    let raw = backend.run(query, count, sort)?;
-    parse_results(&raw)
+impl SearchBackend for YtDlpBackend {
+    fn search(
+        &self,
+        query: &str,
+        count: u32,
+        sort: SortOrder,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        let raw = self.run_raw(query, count, sort)?;
+        parse_results(&raw)
+    }
 }
 
 #[derive(Deserialize)]
@@ -433,43 +435,78 @@ mod tests {
         assert_eq!(format_duration(&VideoDuration::Unknown), "—");
     }
 
+    /// Test double that constructs results directly — no JSON-shape
+    /// duplication. The trait now returns `Vec<SearchResult>` so this
+    /// fake doesn't need to know how `yt-dlp` formats its output.
     struct FakeBackend {
         captured: std::sync::Mutex<Option<(String, u32, SortOrder)>>,
-        response: Vec<u8>,
+        response: Vec<SearchResult>,
     }
 
     impl FakeBackend {
-        fn ok(json: &[u8]) -> Self {
+        fn ok(results: Vec<SearchResult>) -> Self {
             Self {
                 captured: std::sync::Mutex::new(None),
-                response: json.to_vec(),
+                response: results,
             }
         }
     }
 
     impl SearchBackend for FakeBackend {
-        fn run(
+        fn search(
             &self,
             query: &str,
             count: u32,
             sort: SortOrder,
-        ) -> Result<Vec<u8>, SearchError> {
+        ) -> Result<Vec<SearchResult>, SearchError> {
             *self.captured.lock().expect("lock") =
                 Some((query.to_string(), count, sort));
             Ok(self.response.clone())
         }
     }
 
+    fn fixture_results() -> Vec<SearchResult> {
+        vec![
+            SearchResult {
+                id: "vid1".to_string(),
+                title: "First".to_string(),
+                channel: Some("Chan A".to_string()),
+                duration: VideoDuration::Seconds(60),
+            },
+            SearchResult {
+                id: "vid2".to_string(),
+                title: "Second".to_string(),
+                channel: None,
+                duration: VideoDuration::Live,
+            },
+        ]
+    }
+
     #[test]
-    fn search_passes_args_to_backend() {
-        let backend = FakeBackend::ok(FIXTURE_HAPPY);
-        let results =
-            search(&backend, "rust ratatui", 20, SortOrder::Relevance).unwrap();
-        assert_eq!(results.len(), 3);
+    fn fake_backend_passes_args_through() {
+        let backend = FakeBackend::ok(fixture_results());
+        let results = backend
+            .search("rust ratatui", 20, SortOrder::Relevance)
+            .unwrap();
+        assert_eq!(results.len(), 2);
         let captured = backend.captured.lock().unwrap().clone().unwrap();
         assert_eq!(captured.0, "rust ratatui");
         assert_eq!(captured.1, 20);
         assert_eq!(captured.2, SortOrder::Relevance);
+    }
+
+    #[test]
+    fn ytdlp_backend_search_parses_through_to_results() {
+        // End-to-end via the trait: spawn errors propagate as SearchError,
+        // not as bytes that fail to parse later.
+        let backend = YtDlpBackend {
+            timeout: StdDuration::from_secs(5),
+            binary: PathBuf::from("definitely-not-a-real-binary-asdf"),
+        };
+        let err = backend
+            .search("anything", 1, SortOrder::Relevance)
+            .unwrap_err();
+        assert!(matches!(err, SearchError::Spawn(_)));
     }
 
     #[test]
@@ -484,7 +521,9 @@ mod tests {
             timeout: StdDuration::from_secs(5),
             binary: PathBuf::from("definitely-not-a-real-binary-asdf"),
         };
-        let err = backend.run("anything", 1, SortOrder::Relevance).unwrap_err();
+        let err = backend
+            .run_raw("anything", 1, SortOrder::Relevance)
+            .unwrap_err();
         assert!(matches!(err, SearchError::Spawn(_)));
     }
 
@@ -496,7 +535,9 @@ mod tests {
             timeout: StdDuration::from_millis(100),
             binary: PathBuf::from("yes"),
         };
-        let err = backend.run("anything", 1, SortOrder::Relevance).unwrap_err();
+        let err = backend
+            .run_raw("anything", 1, SortOrder::Relevance)
+            .unwrap_err();
         assert!(
             matches!(err, SearchError::Timeout(_)),
             "expected Timeout, got {err:?}"

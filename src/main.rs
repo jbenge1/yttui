@@ -1,4 +1,199 @@
-fn main() {
-    eprintln!("yttui: not yet implemented (V1.0 in progress)");
-    std::process::exit(1);
+use std::io::{self, Stdout};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
+use std::time::Duration;
+
+use crossterm::cursor::{Hide, Show};
+use crossterm::event::{self, Event};
+use crossterm::execute;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+    enable_raw_mode,
+};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+
+use yttui::app::{Action, App};
+use yttui::player::{MpvPlayer, PlaybackOptions, play_result};
+use yttui::search::{
+    SearchBackend, SearchError, SearchResult, SortOrder, YtDlpBackend,
+};
+
+const DEFAULT_RESULT_COUNT: u32 = 20;
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+type Term = Terminal<CrosstermBackend<Stdout>>;
+type SearchOutcome = (u64, Result<Vec<SearchResult>, SearchError>);
+
+fn main() -> io::Result<()> {
+    // Parse positional args naively — full clap CLI lands in slice 5.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let initial_query = if args.is_empty() {
+        None
+    } else {
+        Some(args.join(" "))
+    };
+
+    install_panic_hook();
+    let mut terminal = setup_terminal()?;
+    let result = run(&mut terminal, initial_query);
+    restore_terminal(&mut terminal)?;
+    if let Err(e) = &result {
+        eprintln!("yttui: {e}");
+    }
+    result
 }
+
+fn run(terminal: &mut Term, initial_query: Option<String>) -> io::Result<()> {
+    let backend = YtDlpBackend::default();
+    let player = MpvPlayer::default();
+    let opts = PlaybackOptions::default();
+
+    let mut app = App::new();
+    let mut pending_search: Option<Receiver<SearchOutcome>> = None;
+    let search_seq = Arc::new(AtomicU64::new(0));
+
+    // If we got an initial query on the CLI, fire it immediately.
+    if let Some(q) = initial_query {
+        let (state, action) = App::with_initial_query(&q);
+        app = state;
+        if let Action::StartSearch(query) = action {
+            pending_search =
+                Some(spawn_search(&backend, &search_seq, query, false));
+        }
+    }
+
+    loop {
+        terminal.draw(|frame| yttui::tui::draw(frame, &mut app))?;
+
+        // Drain any completed search before polling input.
+        if let Some(rx) = &pending_search {
+            match rx.try_recv() {
+                Ok((seq, outcome)) => {
+                    let current = search_seq.load(Ordering::SeqCst);
+                    if seq == current {
+                        match outcome {
+                            Ok(results) => app.set_results(results),
+                            Err(e) => app.set_search_error(Arc::new(e)),
+                        }
+                    }
+                    pending_search = None;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    pending_search = None;
+                }
+            }
+        }
+
+        if !event::poll(POLL_INTERVAL)? {
+            continue;
+        }
+
+        let key = match event::read()? {
+            Event::Key(k) if k.kind == event::KeyEventKind::Press => k,
+            // Other events (resize, focus, mouse, paste, key-release) just
+            // trigger another draw on the next loop iteration.
+            _ => continue,
+        };
+
+        match app.handle_key(key) {
+            Action::None => {}
+            Action::Quit => return Ok(()),
+            Action::StartSearch(q) => {
+                pending_search =
+                    Some(spawn_search(&backend, &search_seq, q, false));
+            }
+            Action::Rerun => {
+                if let Some(q) = app.committed_query.clone() {
+                    pending_search =
+                        Some(spawn_search(&backend, &search_seq, q, false));
+                }
+            }
+            Action::CancelSearch => {
+                // Bump the seq so any in-flight result is discarded.
+                search_seq.fetch_add(1, Ordering::SeqCst);
+                pending_search = None;
+            }
+            Action::Play(result) => {
+                if let Err(e) = play_with_swap(terminal, &player, &result, &opts)
+                {
+                    app.set_player_error(Arc::new(e));
+                }
+            }
+        }
+    }
+}
+
+fn spawn_search(
+    backend: &YtDlpBackend,
+    seq: &Arc<AtomicU64>,
+    query: String,
+    recent: bool,
+) -> Receiver<SearchOutcome> {
+    let (tx, rx) = mpsc::channel();
+    let backend = backend.clone();
+    let seq = seq.clone();
+    let this_seq = seq.fetch_add(1, Ordering::SeqCst) + 1;
+    let sort = if recent {
+        SortOrder::Date
+    } else {
+        SortOrder::Relevance
+    };
+    thread::spawn(move || {
+        let outcome = backend.search(&query, DEFAULT_RESULT_COUNT, sort);
+        // Best-effort send; receiver may be gone if the user moved on.
+        let _ = tx.send((this_seq, outcome));
+    });
+    rx
+}
+
+fn play_with_swap(
+    terminal: &mut Term,
+    player: &MpvPlayer,
+    result: &SearchResult,
+    opts: &PlaybackOptions,
+) -> Result<(), yttui::player::PlayerError> {
+    // #30 contract: leave alt screen so mpv can take the terminal cleanly,
+    // restore on return.
+    let _ = restore_terminal(terminal);
+    let outcome = play_result(player, result, opts);
+    if let Err(e) = re_enter_terminal(terminal) {
+        log::warn!("failed to re-enter alternate screen: {e}");
+    }
+    outcome
+}
+
+fn setup_terminal() -> io::Result<Term> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, Hide)?;
+    Terminal::new(CrosstermBackend::new(stdout))
+}
+
+fn re_enter_terminal(terminal: &mut Term) -> io::Result<()> {
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen, Hide)?;
+    terminal.clear()?;
+    Ok(())
+}
+
+fn restore_terminal(terminal: &mut Term) -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, Show)?;
+    Ok(())
+}
+
+/// Best-effort terminal restoration on panic so the user's shell isn't
+/// left in raw mode with the alt screen up.
+fn install_panic_hook() {
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
+        original(info);
+    }));
+}
+

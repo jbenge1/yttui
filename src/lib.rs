@@ -1,4 +1,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+pub mod app;
 pub mod player;
 pub mod search;
+pub mod tui;

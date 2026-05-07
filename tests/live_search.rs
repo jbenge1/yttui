@@ -3,13 +3,14 @@
 
 #![allow(clippy::unwrap_used)]
 
-use yttui::search::{SortOrder, YtDlpBackend, search};
+use yttui::search::{SearchBackend, SortOrder, YtDlpBackend};
 
 #[test]
 #[ignore = "hits the network; run with --ignored"]
 fn live_search_returns_results() {
     let backend = YtDlpBackend::default();
-    let results =
-        search(&backend, "rust ratatui", 3, SortOrder::Relevance).unwrap();
+    let results = backend
+        .search("rust ratatui", 3, SortOrder::Relevance)
+        .unwrap();
     assert!(!results.is_empty(), "expected at least one result");
 }
