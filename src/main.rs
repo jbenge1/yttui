@@ -134,6 +134,12 @@ fn run(terminal: &mut Term, cli: &Cli) -> io::Result<()> {
             _ => continue,
         };
 
+        // `Action::None` and the `_` wildcard arm have identical
+        // bodies, but we want them spelled separately: `None` is the
+        // real "nothing happened" path; `_` exists only because
+        // `Action` is `#[non_exhaustive]` and future variants must
+        // not be silently swallowed without a deliberate decision here.
+        #[allow(clippy::match_same_arms)]
         match app.handle_key(key) {
             Action::None => {}
             Action::Quit => return Ok(()),
@@ -159,6 +165,10 @@ fn run(terminal: &mut Term, cli: &Cli) -> io::Result<()> {
                     app.set_player_error(Arc::new(e));
                 }
             }
+            // `Action` is `#[non_exhaustive]`. Future variants must
+            // not silently fall off the loop; we treat them as a
+            // no-op until handled explicitly.
+            _ => {}
         }
     }
 }

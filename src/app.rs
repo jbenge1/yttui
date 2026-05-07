@@ -20,6 +20,7 @@ use crate::player::PlayerError;
 use crate::search::SearchResult;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Screen {
     Prompt,
     Searching,
@@ -31,6 +32,7 @@ pub enum Screen {
 /// Error stash for the status bar. Per the pre-Slice-3 decision (#24),
 /// the library types stay non-`Clone`; the TUI wraps in `Arc`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum LastError {
     Search(Arc<DispatchError>),
     Player(Arc<PlayerError>),
@@ -50,6 +52,7 @@ impl LastError {
 /// responsible for actually performing them (spawning threads,
 /// suspending the terminal, exiting).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Action {
     None,
     Quit,

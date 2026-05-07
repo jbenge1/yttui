@@ -30,6 +30,7 @@ impl SortOrder {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VideoDuration {
     Seconds(u64),
     Live,
@@ -75,6 +76,7 @@ pub struct SearchResult {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum SearchError {
     #[error("yt-dlp returned invalid JSON: {0}")]
     InvalidJson(#[from] serde_json::Error),
