@@ -103,6 +103,26 @@ Apps launched from Finder, Spotlight, or Raycast inherit a minimal
 it from a real terminal — Ghostty, iTerm, Terminal.app — so the
 shell's `$PATH` applies.
 
+## Signals and orphan prevention
+
+`yttui` runs `mpv` (and `yt-dlp`) in their own process groups so a
+`SIGINT`/`SIGTERM` to `yttui` itself, or a `Ctrl-C` at the parent
+terminal during playback, will tear the children down with it instead
+of orphaning them. The signal-watcher thread runs from process start
+to exit; manual verification:
+
+```sh
+# Terminal A
+yttui rust ratatui          # search, then Enter on a result
+# Terminal B (while mpv is playing)
+kill -INT $(pgrep -x yttui) # or `kill -TERM …`
+pgrep mpv                   # should print nothing
+```
+
+`SIGKILL` (`kill -9`) is uninterceptable — it bypasses the watcher
+and will leak `mpv`. That's a kernel limitation, not something
+`yttui` can fix.
+
 ## Privacy
 
 All state is local — no telemetry, no cloud sync. `yt-dlp` talks to

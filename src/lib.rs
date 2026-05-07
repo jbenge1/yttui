@@ -6,4 +6,5 @@ pub mod dispatcher;
 pub mod player;
 pub mod preflight;
 pub mod search;
+pub mod signal;
 pub mod tui;

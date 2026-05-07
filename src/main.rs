@@ -17,7 +17,7 @@ use ratatui::backend::CrosstermBackend;
 use yttui::app::{Action, App};
 use yttui::cli::Cli;
 use yttui::dispatcher::{DispatchError, PendingSearch, SearchDispatcher};
-use yttui::player::{MpvPlayer, PlaybackOptions, play_result};
+use yttui::player::{MpvPlayer, PlaybackOptions, play_result_with_pid_observer};
 use yttui::search::{SearchResult, YtDlpBackend};
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -40,6 +40,22 @@ fn main() {
     }
     init_logger();
     install_panic_hook();
+    // Install the SIGINT/SIGTERM watcher *before* setup_terminal so a
+    // Ctrl-C that races against startup still leaves a clean tty
+    // behind. The watcher kills any registered child group (mpv) on
+    // signal — V1 spec AC #4. See `yttui::signal` for the full why.
+    if let Err(e) = yttui::signal::install_handler(
+        &yttui::signal::REGISTRY,
+        signal_cleanup,
+    ) {
+        // Non-fatal: we lose the orphan-prevention guarantee for the
+        // signal path, but the rest of the app still works. Warn loud
+        // since this is a real degradation of correctness.
+        eprintln!(
+            "yttui: warning: could not install signal handler: {e} \
+             (Ctrl-C during playback may leak mpv)"
+        );
+    }
     // Setup/restore/run errors must surface with the same `yttui:`
     // prefix everywhere. Returning `Err(_)` from `main` would route
     // through `Termination::report`, which double-prints a debug-format
@@ -186,7 +202,13 @@ fn play_with_swap(
     if let Err(e) = restore_terminal(terminal) {
         log::warn!("failed to leave alternate screen before mpv: {e}");
     }
-    let outcome = play_result(player, result, opts);
+    let outcome = play_result_with_pid_observer(player, result, opts, &|pid| {
+        // Register the live mpv pgid with the signal-watcher so a
+        // SIGINT/SIGTERM at the parent terminal kills mpv too. See
+        // `yttui::signal` for the orphan-prevention rationale.
+        yttui::signal::REGISTRY.register(pid);
+    });
+    yttui::signal::REGISTRY.clear();
     if let Err(e) = re_enter_terminal(terminal) {
         log::warn!("failed to re-enter alternate screen after mpv: {e}");
     }
@@ -255,6 +277,15 @@ fn init_logger() {
         simplelog::Config::default(),
         file,
     );
+}
+
+/// Cleanup invoked by the signal watcher just before
+/// `process::exit(130)`. Best-effort terminal restore so the user's
+/// shell isn't left in raw mode with the alt screen up. Mirrors
+/// [`install_panic_hook`].
+fn signal_cleanup() {
+    let _ = disable_raw_mode();
+    let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
 }
 
 /// Best-effort terminal restoration on panic so the user's shell isn't

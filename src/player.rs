@@ -55,6 +55,23 @@ pub trait Player {
         &self,
         video_id: &str,
         opts: &PlaybackOptions,
+    ) -> Result<(), PlayerError> {
+        self.play_with_pid_observer(video_id, opts, &|_| {})
+    }
+
+    /// Variant of [`Self::play`] that invokes `on_spawn` once the
+    /// player subprocess has been started, passing the
+    /// process-group-leader pid. Used by the signal handler so a
+    /// Ctrl-C at the parent terminal can kill the player's group on
+    /// the way out instead of orphaning it.
+    ///
+    /// # Errors
+    /// Same as [`Self::play`].
+    fn play_with_pid_observer(
+        &self,
+        video_id: &str,
+        opts: &PlaybackOptions,
+        on_spawn: &dyn Fn(u32),
     ) -> Result<(), PlayerError>;
 }
 
@@ -105,25 +122,28 @@ fn classify_exit(status: ExitStatus) -> Result<(), PlayerError> {
 }
 
 impl Player for MpvPlayer {
-    fn play(
+    fn play_with_pid_observer(
         &self,
         video_id: &str,
         opts: &PlaybackOptions,
+        on_spawn: &dyn Fn(u32),
     ) -> Result<(), PlayerError> {
         let args = mpv_args(video_id, opts);
         // Spawn the player in its own process group so that:
         //   1. We can kill the entire group (including any helper processes
         //      mpv forks) by killing the leader.
-        //   2. A future Ctrl-C handler / panic hook on the parent can clean
-        //      up subprocesses without leaking orphans (V1 spec
-        //      requirement).
-        // Note: SIGKILL on the parent is not interceptable; an orphan can
-        // still occur if the user `kill -9`s yttui itself. Catchable
-        // signals will be wired up in Slice 3 / 4.
+        //   2. The signal-watcher thread (`yttui::signal`) can kill the
+        //      group on SIGINT/SIGTERM via the pid handed to `on_spawn`,
+        //      preventing orphaned mpv processes (V1 AC #4).
+        // Note: SIGKILL on the parent is not interceptable; an orphan
+        // can still occur if the user `kill -9`s yttui itself.
         let mut child = Command::new(&self.binary)
             .args(&args)
             .group_spawn()
             .map_err(PlayerError::Spawn)?;
+        // GroupChild::id() returns the underlying child's pid; since
+        // we used group_spawn, that pid is also the pgid.
+        on_spawn(child.id());
         let status = child.wait().map_err(PlayerError::Wait)?;
         classify_exit(status)
     }
@@ -141,12 +161,27 @@ pub fn play_result<P: Player>(
     result: &SearchResult,
     opts: &PlaybackOptions,
 ) -> Result<(), PlayerError> {
+    play_result_with_pid_observer(player, result, opts, &|_| {})
+}
+
+/// Same as [`play_result`] but threads `on_spawn` down to the player so
+/// the caller can register the live process-group-leader pid (e.g.
+/// with [`crate::signal::REGISTRY`]) before the wait blocks.
+///
+/// # Errors
+/// Same as [`play_result`].
+pub fn play_result_with_pid_observer<P: Player>(
+    player: &P,
+    result: &SearchResult,
+    opts: &PlaybackOptions,
+    on_spawn: &dyn Fn(u32),
+) -> Result<(), PlayerError> {
     if !result.duration.is_playable() {
         return Err(PlayerError::NotPlayable {
             reason: result.duration.to_string(),
         });
     }
-    player.play(&result.id, opts)
+    player.play_with_pid_observer(&result.id, opts, on_spawn)
 }
 
 #[cfg(test)]
@@ -199,6 +234,31 @@ mod tests {
             binary: PathBuf::from("true"),
         };
         player.play("anything", &PlaybackOptions::default()).unwrap();
+    }
+
+    #[test]
+    fn play_with_pid_observer_invokes_callback_with_live_pid() {
+        // Pin the contract the signal handler depends on: when
+        // MpvPlayer spawns the player, it must hand the pgid to
+        // `on_spawn` *before* it blocks on wait — otherwise the
+        // signal-watcher has nothing to kill and we re-orphan mpv on
+        // Ctrl-C. `true` is fine here: it spawns + exits immediately,
+        // so we just need to confirm we got *some* non-zero pid.
+        use std::sync::Mutex;
+        let player = MpvPlayer {
+            binary: PathBuf::from("true"),
+        };
+        let observed: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+        player
+            .play_with_pid_observer(
+                "anything",
+                &PlaybackOptions::default(),
+                &|pid| observed.lock().unwrap().push(pid),
+            )
+            .unwrap();
+        let pids = observed.into_inner().unwrap();
+        assert_eq!(pids.len(), 1, "observer must be called exactly once");
+        assert!(pids[0] > 0, "pid must be set: {pids:?}");
     }
 
     #[test]
@@ -275,10 +335,11 @@ mod tests {
     }
 
     impl Player for FakePlayer {
-        fn play(
+        fn play_with_pid_observer(
             &self,
             video_id: &str,
             opts: &PlaybackOptions,
+            _on_spawn: &dyn Fn(u32),
         ) -> Result<(), PlayerError> {
             *self.called_with.lock().unwrap() =
                 Some((video_id.to_string(), opts.audio_only));
