@@ -18,6 +18,7 @@ use thiserror::Error;
 /// [`PreflightError::Missing`] so a single launch can report every
 /// dependency at once.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MissingBinary {
     pub name: &'static str,
     pub instructions: &'static str,
