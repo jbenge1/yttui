@@ -273,10 +273,14 @@ fn render_row(r: &SearchResult, width: u16) -> ListItem<'static> {
     ListItem::new(line)
 }
 
-/// Truncate `s` to fit within `max_cols` display columns, adding a
-/// single-character ellipsis if truncated. Returns an empty string when
-/// `max_cols == 0`. Respects unicode display width (CJK chars are
-/// 2 cols).
+/// Truncate `s` to fit within `max_cols` display columns. When the
+/// input doesn't fit, append a single-column ellipsis — *unless*
+/// dropping the ellipsis would let us pack one more source character
+/// into the same budget (i.e. the prefix saturates `max_cols` exactly
+/// and only one character was dropped, where the ellipsis carries no
+/// information the missing glyph wouldn't have). Respects unicode
+/// display width (CJK chars are 2 cols). Returns the empty string when
+/// `max_cols == 0`.
 fn truncate_to_width(s: &str, max_cols: u16) -> String {
     let max = usize::from(max_cols);
     if s.width() <= max {
@@ -285,18 +289,39 @@ fn truncate_to_width(s: &str, max_cols: u16) -> String {
     if max == 0 {
         return String::new();
     }
-    // Build up character-by-character respecting display width.
+
+    // Default contract: trim to `max - 1` cols and append an ellipsis,
+    // so the trailing "…" always signals "more was here". One special
+    // case: when the `max - 1` prefix is empty (e.g. budget = 2 with a
+    // 2-col CJK first character), the ellipsis form degenerates to a
+    // bare "…" that wastes the budget. In that case prefer the
+    // saturating prefix in `max` cols — at least one glyph fits, and a
+    // clipped glyph is its own truncation marker.
+    let prefix_minus_one = greedy_prefix(s, max - 1);
+    if prefix_minus_one.is_empty() {
+        let prefix_full = greedy_prefix(s, max);
+        if !prefix_full.is_empty() {
+            return prefix_full;
+        }
+    }
+    let mut out = prefix_minus_one;
+    out.push('…');
+    out
+}
+
+/// Greedy character-by-character prefix of `s` that fits in `max_cols`
+/// display columns.
+fn greedy_prefix(s: &str, max_cols: usize) -> String {
     let mut out = String::new();
-    let mut width = 0;
+    let mut width = 0usize;
     for ch in s.chars() {
         let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + cw > max.saturating_sub(1) {
+        if width + cw > max_cols {
             break;
         }
         out.push(ch);
         width += cw;
     }
-    out.push('…');
     out
 }
 
@@ -435,17 +460,42 @@ mod tests {
     }
 
     #[test]
-    fn truncate_budget_one_returns_just_ellipsis() {
-        // Budget 1: nothing fits before the ellipsis (max-1 = 0).
-        assert_eq!(truncate_to_width("abc", 1), "…");
+    fn truncate_budget_one_returns_first_char_when_one_fits() {
+        // Pin for second-opinion P2 #6: the old contract returned "…"
+        // because reserving 1 col for the ellipsis left no room for any
+        // input character. With the revised "ellipsis form would be a
+        // bare …, prefer the saturating prefix" rule, budget 1 +
+        // 1-col first char yields the first char itself — a clipped
+        // glyph is its own truncation marker.
+        assert_eq!(truncate_to_width("abc", 1), "a");
     }
 
     #[test]
     fn truncate_respects_unicode_width() {
         // Each CJK char is 2 cols; "あいう" = 6 cols.
-        // Budget 4: max-1 = 3, "あ" (2 cols) fits, "い" (2 cols) doesn't
-        // (2+2 > 3), so we stop. Output: "あ…" = 3 cols.
+        // Budget 4: "あ" (2 cols) fits, plus a 1-col ellipsis = 3 cols
+        // total. Adding "い" would push us to 4 + ellipsis = 5 > 4.
         assert_eq!(truncate_to_width("あいう", 4), "あ…");
+    }
+
+    #[test]
+    fn truncate_uses_full_budget_when_one_wide_char_fits_exactly() {
+        // Pinning fix for second-opinion P2 #6: with budget 2 and input
+        // "あいう" (6 cols, won't fit), the 2-col "あ" exactly saturates
+        // the budget. Returning "…" (1 col) wastes the slot; returning
+        // "あ" loses no information that an ellipsis would convey
+        // (any glyph is already a truncation indicator). Old code
+        // returned "…"; new behavior returns "あ".
+        assert_eq!(truncate_to_width("あいう", 2), "あ");
+    }
+
+    #[test]
+    fn truncate_keeps_ellipsis_when_a_prefix_actually_fits_in_max_minus_one() {
+        // Sanity: the special-case fix only kicks in when the
+        // `(max - 1)` prefix is empty. With budget 4 and input "abcde",
+        // "abc" fits in 3 cols, so we keep the canonical prefix +
+        // ellipsis form rather than packing in "abcd".
+        assert_eq!(truncate_to_width("abcde", 4), "abc…");
     }
 
     #[test]
