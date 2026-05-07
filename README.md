@@ -26,13 +26,15 @@ install it.
 
 ## Install
 
-From source (after cloning):
+From source:
 
 ```sh
+git clone <repo-url> yttui
+cd yttui
 cargo install --path .
 ```
 
-From a Git remote:
+Or directly:
 
 ```sh
 cargo install --git <repo-url>
