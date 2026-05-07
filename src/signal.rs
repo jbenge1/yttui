@@ -172,11 +172,17 @@ impl Drop for RegistrationGuard<'_> {
     }
 }
 
-/// Install a SIGINT/SIGTERM watcher thread. On signal:
+/// Install a SIGINT/SIGTERM watcher thread. On the **first** signal:
 ///   1. Kill the registered child process group (if any).
 ///   2. Run `cleanup` (typically: `disable_raw_mode` + leave alt screen).
 ///   3. Exit the process with status 130 (128 + SIGINT) so shells see
 ///      "interrupted by user", consistent with most CLI tools.
+///
+/// On a **second** signal arriving while the first-signal cleanup is
+/// still in progress, exit immediately with 130 (#72). Matches POSIX
+/// shell convention ("hit Ctrl-C twice to escape"); the watcher must
+/// not be harder to escape than the system shell when its own kill /
+/// cleanup wedges on something pathological.
 ///
 /// # Errors
 /// Returns the underlying `io::Error` if `signal-hook` cannot register
@@ -194,25 +200,57 @@ where
 
     let mut signals = Signals::new([SIGINT, SIGTERM])?;
     std::thread::spawn(move || {
-        // Single iteration is enough — on the first fatal signal, kill
-        // children, run cleanup, and exit. If the cleanup hangs and the
-        // user hits Ctrl-C again, the process still gets the default
-        // signal handler (we exited the thread already).
-        if let Some(_sig) = signals.forever().next() {
-            registry.kill_group();
-            cleanup();
-            // 130 = "terminated by SIGINT", the conventional shell exit
-            // code for Ctrl-C. SIGTERM users will see the same; close
-            // enough.
-            std::process::exit(130);
-        }
+        let mut iter = signals.forever();
+        run_watcher_loop(
+            || iter.next().map(|_| ()),
+            move || {
+                registry.kill_group();
+                cleanup();
+                std::process::exit(130);
+            },
+            || std::process::exit(130),
+        );
     });
     Ok(())
+}
+
+/// The watcher's signal-dispatch loop, factored out of
+/// [`install_handler`] so the escalation contract (#72) is unit-
+/// testable without real signals.
+///
+/// Contract:
+///   - First `next_signal()` → `Some(())`: spawn `graceful` on a side
+///     thread (it kills the child and runs cleanup, then process-exits).
+///   - Second `next_signal()` → `Some(())` while graceful is still
+///     running: call `hard_exit` immediately (skip cleanup; user hit
+///     Ctrl-C twice).
+///   - Either `next_signal()` → `None`: return without doing anything
+///     (channel closed; nothing more to do).
+///
+/// `graceful` is `FnOnce + Send + 'static` because it's spawned to a
+/// side thread; `hard_exit` is `FnOnce` and called in this thread.
+fn run_watcher_loop<N, G, H>(
+    mut next_signal: N,
+    graceful: G,
+    hard_exit: H,
+) where
+    N: FnMut() -> Option<()>,
+    G: FnOnce() + Send + 'static,
+    H: FnOnce(),
+{
+    if next_signal().is_none() {
+        return;
+    }
+    std::thread::spawn(graceful);
+    if next_signal().is_some() {
+        hard_exit();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn registry_starts_empty() {
@@ -401,6 +439,107 @@ mod tests {
             None,
             "guard must clear the registry on drop"
         );
+    }
+
+    #[test]
+    fn watcher_first_signal_runs_graceful_does_not_hard_exit() {
+        // Pin #72 (half 1): exactly one signal → run graceful path,
+        // never invoke the hard-exit escape hatch. `next_signal`
+        // returns Some once and None thereafter, modelling "user hit
+        // Ctrl-C exactly once and let cleanup finish."
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+        let graceful_ran = Arc::new(AtomicBool::new(false));
+        let hard_ran = Arc::new(AtomicBool::new(false));
+        let calls = AtomicU32::new(0);
+
+        let g = graceful_ran.clone();
+        let h = hard_ran.clone();
+
+        run_watcher_loop(
+            || {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 { Some(()) } else { None }
+            },
+            move || {
+                g.store(true, Ordering::SeqCst);
+            },
+            move || {
+                h.store(true, Ordering::SeqCst);
+            },
+        );
+
+        // Wait briefly for the spawned graceful thread to run.
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(1);
+        while !graceful_ran.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "graceful never ran"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            !hard_ran.load(Ordering::SeqCst),
+            "hard_exit must NOT run on a single signal"
+        );
+    }
+
+    #[test]
+    fn watcher_second_signal_invokes_hard_exit() {
+        // Pin #72 (half 2): if the iterator yields twice — i.e. the
+        // user hit Ctrl-C while graceful was still running — the loop
+        // must call `hard_exit`. This is the POSIX-conventional double-
+        // Ctrl-C escalation that the previous one-shot
+        // signals.forever().next() could not provide.
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+        let hard_ran = Arc::new(AtomicBool::new(false));
+        let calls = AtomicU32::new(0);
+
+        let h = hard_ran.clone();
+
+        run_watcher_loop(
+            || {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                if n < 2 { Some(()) } else { None }
+            },
+            // Side-thread graceful: simulate "wedged cleanup" by
+            // sleeping; the hard-exit must beat us. We don't observe
+            // its completion — the contract only demands hard_exit
+            // fired.
+            || std::thread::sleep(std::time::Duration::from_millis(50)),
+            move || h.store(true, Ordering::SeqCst),
+        );
+
+        assert!(
+            hard_ran.load(Ordering::SeqCst),
+            "hard_exit MUST run on the second signal"
+        );
+    }
+
+    #[test]
+    fn watcher_no_signal_is_a_noop() {
+        // Pin: if the iterator returns None first (channel closed
+        // before any signal), the loop must not spawn graceful or
+        // call hard_exit.
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let graceful_ran = Arc::new(AtomicBool::new(false));
+        let hard_ran = Arc::new(AtomicBool::new(false));
+
+        let g = graceful_ran.clone();
+        let h = hard_ran.clone();
+
+        run_watcher_loop(
+            || None,
+            move || g.store(true, Ordering::SeqCst),
+            move || h.store(true, Ordering::SeqCst),
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(!graceful_ran.load(Ordering::SeqCst));
+        assert!(!hard_ran.load(Ordering::SeqCst));
     }
 
     #[test]
