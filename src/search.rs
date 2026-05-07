@@ -170,9 +170,7 @@ impl SearchBackend for YtDlpBackend {
             .map_err(SearchError::Read)?;
         let stderr_buf = stderr_thread
             .join()
-            .map_err(|_| {
-                SearchError::Read(std::io::Error::other("stderr reader panicked"))
-            })?
+            .map_err(|_| SearchError::ReaderPanicked)?
             .map_err(SearchError::Read)?;
 
         if !status.success() {
