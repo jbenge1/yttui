@@ -1,6 +1,6 @@
 use std::io::{self, Stdout};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Duration;
@@ -17,15 +17,18 @@ use ratatui::backend::CrosstermBackend;
 
 use yttui::app::{Action, App};
 use yttui::player::{MpvPlayer, PlaybackOptions, play_result};
-use yttui::search::{
-    SearchBackend, SearchError, SearchResult, SortOrder, YtDlpBackend,
-};
+use yttui::search::{SearchError, SearchResult, SortOrder, YtDlpBackend};
 
 const DEFAULT_RESULT_COUNT: u32 = 20;
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 type SearchOutcome = (u64, Result<Vec<SearchResult>, SearchError>);
+
+struct PendingSearch {
+    rx: Receiver<SearchOutcome>,
+    cancel: Arc<AtomicBool>,
+}
 
 fn main() -> io::Result<()> {
     // Parse positional args naively — full clap CLI lands in slice 5.
@@ -36,6 +39,10 @@ fn main() -> io::Result<()> {
         Some(args.join(" "))
     };
 
+    if let Err(e) = yttui::preflight::check() {
+        eprintln!("yttui: {e}");
+        std::process::exit(2);
+    }
     init_logger();
     install_panic_hook();
     let mut terminal = setup_terminal()?;
@@ -53,7 +60,7 @@ fn run(terminal: &mut Term, initial_query: Option<String>) -> io::Result<()> {
     let opts = PlaybackOptions::default();
 
     let mut app = App::new();
-    let mut pending_search: Option<Receiver<SearchOutcome>> = None;
+    let mut pending_search: Option<PendingSearch> = None;
     let search_seq = Arc::new(AtomicU64::new(0));
 
     // If we got an initial query on the CLI, fire it immediately.
@@ -70,13 +77,18 @@ fn run(terminal: &mut Term, initial_query: Option<String>) -> io::Result<()> {
         terminal.draw(|frame| yttui::tui::draw(frame, &mut app))?;
 
         // Drain any completed search before polling input.
-        if let Some(rx) = &pending_search {
-            match rx.try_recv() {
+        if let Some(p) = &pending_search {
+            match p.rx.try_recv() {
                 Ok((seq, outcome)) => {
                     let current = search_seq.load(Ordering::SeqCst);
                     if seq == current {
                         match outcome {
                             Ok(results) => app.set_results(results),
+                            // The Cancelled variant only fires when *we*
+                            // tripped the cancel flag, in which case
+                            // we've already moved on — don't blat an
+                            // error banner onto the new state.
+                            Err(SearchError::Cancelled) => {}
                             Err(e) => app.set_search_error(Arc::new(e)),
                         }
                     }
@@ -84,6 +96,10 @@ fn run(terminal: &mut Term, initial_query: Option<String>) -> io::Result<()> {
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
+                    // The worker dropped its sender without sending —
+                    // i.e. the closure panicked. Surface this so the
+                    // user doesn't see a perma-spinner.
+                    app.set_search_error(Arc::new(SearchError::WorkerPanicked));
                     pending_search = None;
                 }
             }
@@ -114,7 +130,12 @@ fn run(terminal: &mut Term, initial_query: Option<String>) -> io::Result<()> {
                 }
             }
             Action::CancelSearch => {
-                // Bump the seq so any in-flight result is discarded.
+                // Trip the cancel flag so the worker actively kills the
+                // yt-dlp process group, then bump the seq counter so
+                // any result already in flight is discarded.
+                if let Some(p) = &pending_search {
+                    p.cancel.store(true, Ordering::SeqCst);
+                }
                 search_seq.fetch_add(1, Ordering::SeqCst);
                 pending_search = None;
             }
@@ -133,22 +154,28 @@ fn spawn_search(
     seq: &Arc<AtomicU64>,
     query: String,
     recent: bool,
-) -> Receiver<SearchOutcome> {
+) -> PendingSearch {
     let (tx, rx) = mpsc::channel();
     let backend = backend.clone();
-    let seq = seq.clone();
     let this_seq = seq.fetch_add(1, Ordering::SeqCst) + 1;
     let sort = if recent {
         SortOrder::Date
     } else {
         SortOrder::Relevance
     };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_clone = cancel.clone();
     thread::spawn(move || {
-        let outcome = backend.search(&query, DEFAULT_RESULT_COUNT, sort);
+        let outcome = backend.search_with_cancel(
+            &query,
+            DEFAULT_RESULT_COUNT,
+            sort,
+            &cancel_clone,
+        );
         // Best-effort send; receiver may be gone if the user moved on.
         let _ = tx.send((this_seq, outcome));
     });
-    rx
+    PendingSearch { rx, cancel }
 }
 
 fn play_with_swap(
@@ -158,11 +185,15 @@ fn play_with_swap(
     opts: &PlaybackOptions,
 ) -> Result<(), yttui::player::PlayerError> {
     // #30 contract: leave alt screen so mpv can take the terminal cleanly,
-    // restore on return.
-    let _ = restore_terminal(terminal);
+    // restore on return. We log loud on either failure but don't abort
+    // playback — leaving alt screen partially can produce visual junk,
+    // but the re-enter side will clear() and recover.
+    if let Err(e) = restore_terminal(terminal) {
+        log::warn!("failed to leave alternate screen before mpv: {e}");
+    }
     let outcome = play_result(player, result, opts);
     if let Err(e) = re_enter_terminal(terminal) {
-        log::warn!("failed to re-enter alternate screen: {e}");
+        log::warn!("failed to re-enter alternate screen after mpv: {e}");
     }
     outcome
 }

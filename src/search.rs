@@ -2,12 +2,16 @@ use std::fmt;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration as StdDuration;
+use std::time::{Duration as StdDuration, Instant};
 
+use command_group::CommandGroup;
 use serde::Deserialize;
 use thiserror::Error;
-use wait_timeout::ChildExt;
+
+/// How often the cancel/timeout polling loop wakes to check the child.
+const POLL_INTERVAL: StdDuration = StdDuration::from_millis(50);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortOrder {
@@ -82,10 +86,14 @@ pub enum SearchError {
     Read(#[source] std::io::Error),
     #[error("yt-dlp output reader thread panicked")]
     ReaderPanicked,
+    #[error("search worker thread crashed before producing a result")]
+    WorkerPanicked,
     #[error("yt-dlp exited with status {status}: {stderr}")]
     NonZeroExit { status: i32, stderr: String },
     #[error("yt-dlp timed out after {0:?}")]
     Timeout(StdDuration),
+    #[error("search cancelled by user")]
+    Cancelled,
 }
 
 pub trait SearchBackend {
@@ -119,15 +127,36 @@ impl Default for YtDlpBackend {
 }
 
 impl YtDlpBackend {
-    /// Spawn `yt-dlp` and return its raw stdout bytes. Internal helper
-    /// for [`SearchBackend::search`]; exposed at module scope so tests
-    /// can exercise the subprocess-handling path independently of
-    /// parsing.
-    fn run_raw(
+    /// Cancellation-aware variant of [`SearchBackend::search`]. The
+    /// `cancel` flag is polled every [`POLL_INTERVAL`]; if set, the
+    /// `yt-dlp` process group is killed and [`SearchError::Cancelled`]
+    /// is returned.
+    ///
+    /// # Errors
+    /// Same as [`SearchBackend::search`], plus [`SearchError::Cancelled`]
+    /// when the cancel flag is observed mid-run.
+    pub fn search_with_cancel(
         &self,
         query: &str,
         count: u32,
         sort: SortOrder,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        let raw = self.run_raw_with_cancel(query, count, sort, cancel)?;
+        parse_results(&raw)
+    }
+
+    /// Internal helper used by all entry points. Spawns `yt-dlp` in its
+    /// own process group, drains its pipes in background threads, and
+    /// loops on `try_wait` while watching for cancel/timeout. Process
+    /// group means a kill targets `yt-dlp` *and* anything it forked
+    /// (e.g. helper extractors).
+    fn run_raw_with_cancel(
+        &self,
+        query: &str,
+        count: u32,
+        sort: SortOrder,
+        cancel: &AtomicBool,
     ) -> Result<Vec<u8>, SearchError> {
         let target = format!("{}{}:{}", sort.ytsearch_prefix(), count, query);
         let mut child = Command::new(&self.binary)
@@ -136,16 +165,20 @@ impl YtDlpBackend {
             .arg(&target)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .group_spawn()
             .map_err(SearchError::Spawn)?;
 
         // Drain stdout/stderr in background threads so the child can't block
-        // on a full pipe buffer while we wait on it.
+        // on a full pipe buffer while we poll for cancel/timeout.
+        // (`GroupChild::inner` exposes the underlying `Child`, where the
+        // pipe handles live.)
         let mut stdout = child
+            .inner()
             .stdout
             .take()
             .expect("stdout was configured as piped");
         let mut stderr = child
+            .inner()
             .stderr
             .take()
             .expect("stderr was configured as piped");
@@ -158,15 +191,28 @@ impl YtDlpBackend {
             stderr.read_to_end(&mut buf).map(|_| buf)
         });
 
-        let Some(status) = child
-            .wait_timeout(self.timeout)
-            .map_err(SearchError::Wait)?
-        else {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_thread.join();
-            let _ = stderr_thread.join();
-            return Err(SearchError::Timeout(self.timeout));
+        // Poll loop: every POLL_INTERVAL, check (a) cancel flag,
+        // (b) child exit, (c) timeout. Whichever fires first wins.
+        let start = Instant::now();
+        let status = loop {
+            if cancel.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return Err(SearchError::Cancelled);
+            }
+            if let Some(s) = child.try_wait().map_err(SearchError::Wait)? {
+                break s;
+            }
+            if start.elapsed() >= self.timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return Err(SearchError::Timeout(self.timeout));
+            }
+            thread::sleep(POLL_INTERVAL);
         };
 
         let stdout_buf = stdout_thread
@@ -187,6 +233,20 @@ impl YtDlpBackend {
 
         Ok(stdout_buf)
     }
+
+    /// Non-cancellable shorthand for tests that don't care about the
+    /// cancel flag. Lives behind `cfg(test)` because production code
+    /// has switched to `run_raw_with_cancel` everywhere.
+    #[cfg(test)]
+    fn run_raw(
+        &self,
+        query: &str,
+        count: u32,
+        sort: SortOrder,
+    ) -> Result<Vec<u8>, SearchError> {
+        let never = AtomicBool::new(false);
+        self.run_raw_with_cancel(query, count, sort, &never)
+    }
 }
 
 impl SearchBackend for YtDlpBackend {
@@ -196,8 +256,8 @@ impl SearchBackend for YtDlpBackend {
         count: u32,
         sort: SortOrder,
     ) -> Result<Vec<SearchResult>, SearchError> {
-        let raw = self.run_raw(query, count, sort)?;
-        parse_results(&raw)
+        let never = AtomicBool::new(false);
+        self.search_with_cancel(query, count, sort, &never)
     }
 }
 
@@ -532,7 +592,7 @@ mod tests {
         // `yes` ignores its arguments, runs forever, and floods stdout —
         // exercising both the timeout path and the pipe-drain threads.
         let backend = YtDlpBackend {
-            timeout: StdDuration::from_millis(100),
+            timeout: StdDuration::from_millis(200),
             binary: PathBuf::from("yes"),
         };
         let err = backend
@@ -541,6 +601,30 @@ mod tests {
         assert!(
             matches!(err, SearchError::Timeout(_)),
             "expected Timeout, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn cancel_flag_kills_running_process() {
+        // Run `yes` (forever) under a long timeout; trip the cancel flag
+        // from another thread and assert we get Cancelled, not Timeout.
+        let backend = YtDlpBackend {
+            timeout: StdDuration::from_secs(60),
+            binary: PathBuf::from("yes"),
+        };
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let cancel_signal = cancel.clone();
+        let trigger = thread::spawn(move || {
+            thread::sleep(StdDuration::from_millis(150));
+            cancel_signal.store(true, Ordering::SeqCst);
+        });
+        let err = backend
+            .search_with_cancel("anything", 1, SortOrder::Relevance, &cancel)
+            .unwrap_err();
+        trigger.join().expect("trigger thread");
+        assert!(
+            matches!(err, SearchError::Cancelled),
+            "expected Cancelled, got {err:?}"
         );
     }
 }

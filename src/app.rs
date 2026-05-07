@@ -329,10 +329,18 @@ impl App {
 
     pub fn set_search_error(&mut self, err: Arc<SearchError>) {
         self.last_error = Some(LastError::Search(err));
-        // Stay or go back to Prompt so the user can retry.
-        self.screen = Screen::Prompt;
-        if let Some(q) = self.committed_query.clone() {
-            self.input = q;
+        if self.results.is_empty() {
+            // First search failed; bounce to Prompt so the user can fix
+            // the query.
+            self.screen = Screen::Prompt;
+            if let Some(q) = self.committed_query.clone() {
+                self.input = q;
+            }
+        } else {
+            // Re-run failed; keep the previous results visible. The
+            // error renders inline in the footer; the user can `r` to
+            // try again or move on.
+            self.screen = Screen::Results;
         }
     }
 
@@ -682,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn set_search_error_returns_to_prompt_with_query_prefilled() {
+    fn set_search_error_returns_to_prompt_when_no_prior_results() {
         let mut app = App::new();
         app.committed_query = Some("rust".to_string());
         app.screen = Screen::Searching;
@@ -691,6 +699,19 @@ mod tests {
         )));
         assert_eq!(app.screen, Screen::Prompt);
         assert_eq!(app.input, "rust");
+        assert!(app.last_error.is_some());
+    }
+
+    #[test]
+    fn set_search_error_preserves_results_on_rerun() {
+        let mut app = results_app();
+        let original_count = app.results.len();
+        app.screen = Screen::Searching; // mid-rerun
+        app.set_search_error(Arc::new(SearchError::Timeout(
+            std::time::Duration::from_secs(30),
+        )));
+        assert_eq!(app.screen, Screen::Results);
+        assert_eq!(app.results.len(), original_count);
         assert!(app.last_error.is_some());
     }
 

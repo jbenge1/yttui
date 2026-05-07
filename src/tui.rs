@@ -105,39 +105,61 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
-    // Tell the state machine how many rows we can show, so that
-    // ctrl-d/ctrl-u jumps half a real page rather than a guess.
-    app.viewport_height = area.height.saturating_sub(2);
+    // The body block is the single source of truth for inner dimensions.
+    // Whatever its `inner` returns is exactly the rect the sub-drawers
+    // paint into AND what the state machine uses to size half-page jumps.
+    // No more `area.height - 2` magic.
+    let block = Block::default().borders(Borders::ALL);
+    let inner = block.inner(area);
+    app.viewport_height = inner.height;
+    frame.render_widget(block, area);
 
     match app.screen {
-        Screen::Prompt => draw_prompt_body(frame, area, app),
-        Screen::Searching => draw_searching_body(frame, area, app),
+        Screen::Prompt => draw_prompt_body(frame, inner, app),
+        Screen::Searching => draw_searching_body(frame, inner, app),
         Screen::Results | Screen::Filter | Screen::Help => {
-            draw_results_body(frame, area, app);
+            draw_results_body(frame, inner, app);
         }
     }
 }
 
-fn draw_prompt_body(frame: &mut Frame, area: Rect, _app: &App) {
-    let lines = vec![
+fn draw_prompt_body(frame: &mut Frame, inner: Rect, _app: &App) {
+    // Inline help on the Prompt body — "?" is a legal query character so
+    // we don't reserve it as a hotkey here. Modal help is still available
+    // on Results.
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let key = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled("Type a query and press Enter.", dim)),
         Line::from(""),
-        Line::from(Span::styled(
-            "Type a query and press Enter.",
-            Style::default().add_modifier(Modifier::DIM),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "?  show keys    Esc / Ctrl-C  quit",
-            Style::default().add_modifier(Modifier::DIM),
-        )),
+        Line::from(Span::styled("Once you have results:", dim)),
     ];
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
-        area,
-    );
+    let bindings: &[(&str, &str)] = &[
+        ("j / ↓", "next result"),
+        ("k / ↑", "previous result"),
+        ("gg / G", "first / last"),
+        ("Ctrl-d / Ctrl-u", "half-page down / up"),
+        ("Enter", "play selected"),
+        ("/", "filter results"),
+        ("n", "new search"),
+        ("r", "re-run current search"),
+        ("?", "show this help"),
+        ("q / Esc", "quit"),
+    ];
+    for (k, d) in bindings {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("{k:<18}"), key),
+            Span::raw(*d),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_searching_body(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_searching_body(frame: &mut Frame, inner: Rect, app: &App) {
     let q = app.committed_query.as_deref().unwrap_or("");
     let lines = vec![
         Line::from(""),
@@ -151,17 +173,10 @@ fn draw_searching_body(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().add_modifier(Modifier::DIM),
         )),
     ];
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_results_body(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::ALL);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
+fn draw_results_body(frame: &mut Frame, inner: Rect, app: &App) {
     if app.results.is_empty() {
         let p = Paragraph::new(Line::from(Span::styled(
             "No results.",
@@ -276,7 +291,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         ])
     } else {
         let hints = match app.screen {
-            Screen::Prompt => "Enter  search    ?  help    Esc  quit",
+            Screen::Prompt => "Enter  search    Esc / Ctrl-C  quit",
             Screen::Searching => "Esc  cancel",
             Screen::Results => {
                 "j/k  move    Enter  play    /  filter    n  new    r  rerun    ?  help    q  quit"
