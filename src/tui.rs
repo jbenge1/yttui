@@ -111,7 +111,7 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
     // No more `area.height - 2` magic.
     let block = Block::default().borders(Borders::ALL);
     let inner = block.inner(area);
-    app.viewport_height = inner.height;
+    app.list_height = inner.height;
     frame.render_widget(block, area);
 
     match app.screen {

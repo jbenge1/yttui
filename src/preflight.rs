@@ -1,5 +1,14 @@
 //! Startup preflight checks: verify required external binaries are
 //! installed before we hand the terminal over to the TUI.
+//!
+//! ### macOS launch caveat
+//!
+//! `which::which` resolves binaries against `$PATH`. macOS apps launched
+//! from Finder, Spotlight, or Raycast inherit a minimal `$PATH` (no
+//! `/opt/homebrew/bin` or `/usr/local/bin`) and will report `yt-dlp` /
+//! `mpv` as missing even when they're installed. `yttui` is a CLI —
+//! launch it from a terminal so the shell's `$PATH` applies. This will
+//! be documented in the README before V1 ships.
 
 use thiserror::Error;
 
@@ -74,10 +83,11 @@ mod tests {
     }
 
     #[test]
-    fn require_succeeds_for_yt_dlp_on_this_machine() {
-        // Assumes the dev machine has yt-dlp installed (it does — it's
-        // a project dependency for the live integration test).
-        require("yt-dlp").unwrap();
+    fn require_succeeds_for_a_known_unix_binary() {
+        // `ls` is on every Unix and every CI runner — testing the
+        // success branch in isolation, decoupled from whether yt-dlp is
+        // preinstalled on the runner.
+        require("ls").unwrap();
     }
 
     #[test]

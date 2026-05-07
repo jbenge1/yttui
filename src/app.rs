@@ -68,7 +68,7 @@ pub struct App {
     /// Sticky error shown in the status bar; cleared on next user action.
     pub last_error: Option<LastError>,
     /// Page height reported by the renderer, used for half-page jumps.
-    pub viewport_height: u16,
+    pub list_height: u16,
     /// True between the first `g` keypress and the second (or any other key).
     g_pending: bool,
 }
@@ -91,7 +91,7 @@ impl App {
             filtered: Vec::new(),
             selected: 0,
             last_error: None,
-            viewport_height: 20,
+            list_height: 20,
             g_pending: false,
         }
     }
@@ -211,11 +211,11 @@ impl App {
                 Action::None
             }
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                self.move_selection(i32::from(self.viewport_height) / 2);
+                self.move_selection(i32::from(self.list_height) / 2);
                 Action::None
             }
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                self.move_selection(-(i32::from(self.viewport_height) / 2));
+                self.move_selection(-(i32::from(self.list_height) / 2));
                 Action::None
             }
             (KeyCode::Enter, _) => self
@@ -527,7 +527,7 @@ mod tests {
             .map(|i| mk(&format!("v{i}"), &format!("title {i}"), None))
             .collect();
         app.recompute_filter();
-        app.viewport_height = 20;
+        app.list_height = 20;
         app.handle_key(ctrl('d'));
         assert_eq!(app.selected, 10);
     }
@@ -539,7 +539,7 @@ mod tests {
             .map(|i| mk(&format!("v{i}"), &format!("title {i}"), None))
             .collect();
         app.recompute_filter();
-        app.viewport_height = 20;
+        app.list_height = 20;
         app.selected = 30;
         app.handle_key(ctrl('u'));
         assert_eq!(app.selected, 20);

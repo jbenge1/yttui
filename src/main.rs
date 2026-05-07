@@ -17,10 +17,12 @@ use ratatui::backend::CrosstermBackend;
 
 use yttui::app::{Action, App};
 use yttui::player::{MpvPlayer, PlaybackOptions, play_result};
-use yttui::search::{SearchError, SearchResult, SortOrder, YtDlpBackend};
+use yttui::search::{
+    SearchBackend, SearchError, SearchResult, SortOrder, YtDlpBackend,
+};
 
 const DEFAULT_RESULT_COUNT: u32 = 20;
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
+const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 type SearchOutcome = (u64, Result<Vec<SearchResult>, SearchError>);
@@ -82,13 +84,12 @@ fn run(terminal: &mut Term, initial_query: Option<String>) -> io::Result<()> {
                 Ok((seq, outcome)) => {
                     let current = search_seq.load(Ordering::SeqCst);
                     if seq == current {
+                        // Note: `SearchError::Cancelled` is unreachable
+                        // here in practice — `Action::CancelSearch` drops
+                        // `pending_search` before the worker can send,
+                        // so the outcome is discarded by the channel.
                         match outcome {
                             Ok(results) => app.set_results(results),
-                            // The Cancelled variant only fires when *we*
-                            // tripped the cancel flag, in which case
-                            // we've already moved on — don't blat an
-                            // error banner onto the new state.
-                            Err(SearchError::Cancelled) => {}
                             Err(e) => app.set_search_error(Arc::new(e)),
                         }
                     }
@@ -105,7 +106,7 @@ fn run(terminal: &mut Term, initial_query: Option<String>) -> io::Result<()> {
             }
         }
 
-        if !event::poll(POLL_INTERVAL)? {
+        if !event::poll(EVENT_POLL_INTERVAL)? {
             continue;
         }
 
@@ -166,12 +167,8 @@ fn spawn_search(
     let cancel = Arc::new(AtomicBool::new(false));
     let cancel_clone = cancel.clone();
     thread::spawn(move || {
-        let outcome = backend.search_with_cancel(
-            &query,
-            DEFAULT_RESULT_COUNT,
-            sort,
-            &cancel_clone,
-        );
+        let outcome =
+            backend.search(&query, DEFAULT_RESULT_COUNT, sort, &cancel_clone);
         // Best-effort send; receiver may be gone if the user moved on.
         let _ = tx.send((this_seq, outcome));
     });
@@ -221,25 +218,39 @@ fn restore_terminal(terminal: &mut Term) -> io::Result<()> {
 /// Initialize a file logger so `log::warn!` calls (malformed yt-dlp
 /// entries, terminal-restore failures, etc.) actually land somewhere.
 /// Stderr would corrupt the TUI, so we write to a file under the
-/// platform cache dir. Best-effort: if anything fails (no cache dir,
-/// can't create the directory, can't open the file), we silently
-/// continue — `log::warn!` calls become no-ops in that case, but the
-/// TUI itself still works.
+/// platform cache dir. Best-effort: if anything fails we print a
+/// one-line warning to stderr (terminal isn't in alt-screen yet, so
+/// stderr is safe here) and continue — `log::warn!` calls become
+/// no-ops in that case, but the TUI itself still works.
 fn init_logger() {
     let Some(cache) = dirs::cache_dir() else {
+        eprintln!(
+            "yttui: warning: no cache directory available; logs disabled"
+        );
         return;
     };
     let log_dir = cache.join("yttui");
-    if std::fs::create_dir_all(&log_dir).is_err() {
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        eprintln!(
+            "yttui: warning: cannot create log dir {}: {e}; logs disabled",
+            log_dir.display()
+        );
         return;
     }
     let log_path = log_dir.join("yttui.log");
-    let Ok(file) = std::fs::OpenOptions::new()
+    let file = match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log_path)
-    else {
-        return;
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "yttui: warning: cannot open log file {}: {e}; logs disabled",
+                log_path.display()
+            );
+            return;
+        }
     };
     let _ = simplelog::WriteLogger::init(
         log::LevelFilter::Warn,
