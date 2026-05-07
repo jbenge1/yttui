@@ -54,5 +54,22 @@ cast_possible_truncation = "deny"
 cast_sign_loss = "deny"
 unwrap_used = "deny"
 # `cargo` group: kept off because it warns about dual-version transitive
-# crates (e.g. `thiserror 1` pulled in by ratatui's optional termwiz
-# feature, which we don't compile). See SecondOpinion.md F11 for rationale.
+# crates that are present in `Cargo.lock` but not in the compile graph.
+# Specifically (verified via `cargo tree --target all` for the default
+# feature set, on host targets, on 2026-05-08):
+#   - `thiserror 1` is reachable only via `ratatui-termwiz` (an optional
+#     ratatui backend the project does not enable). The compile graph
+#     resolves to `thiserror 2`.
+#   - `bitflags 1` likewise enters the lockfile via unenabled optional
+#     edges; the compile graph uses `bitflags 2` only.
+#   - `getrandom` ships three versions in the lockfile (0.2, 0.3, 0.4);
+#     only 0.2 (via `dirs → dirs-sys → redox_users`) is in the compile
+#     graph. 0.3/0.4 are pulled by unenabled `ratatui-termwiz` /
+#     `phf` edges.
+#   - `nix 0.29` is pulled by `ratatui-termwiz`; we pin our direct dep
+#     to `nix 0.27` (same major as `command-group`'s transitive use)
+#     so the compile graph has a single resolved version.
+# Closing the lockfile gap entirely would require either a
+# `cargo-deny.toml` skip-list or `default-features = false` on
+# `ratatui` with explicit feature opt-in. Tracked as #77; deferred
+# until V2 (no production impact — the duplicates do not compile).
