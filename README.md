@@ -29,7 +29,7 @@ install it.
 From source:
 
 ```sh
-git clone <repo-url> yttui
+git clone https://github.com/jbenge1/yttui
 cd yttui
 cargo install --path .
 ```
@@ -37,7 +37,7 @@ cargo install --path .
 Or directly:
 
 ```sh
-cargo install --git <repo-url>
+cargo install --git https://github.com/jbenge1/yttui
 ```
 
 A Homebrew formula isn't published yet. Build from source for now.
@@ -115,23 +115,9 @@ V1.0. See [`roadmap.md`](./roadmap.md) for V2 (thumbnails, watch
 history, config) and V3 (subscription feed + personal recommendation
 engine).
 
-## Recording the demo
-
-The demo asset above is generated from a [vhs][] tape so it stays
-reproducible. To regenerate:
-
-```sh
-brew install vhs
-vhs docs/demo.tape    # produces docs/demo.gif
-```
-
-The tape file is `docs/demo.tape` — edit and re-run to update the
-visual.
-
 ## License
 
 MIT — see [LICENSE](./LICENSE).
 
 [yt-dlp]: https://github.com/yt-dlp/yt-dlp
 [mpv]: https://mpv.io/
-[vhs]: https://github.com/charmbracelet/vhs
