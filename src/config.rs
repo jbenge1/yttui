@@ -83,6 +83,11 @@ pub struct LogConfig {
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum LogLevel {
+    /// Disables the file logger entirely. Useful for users with
+    /// disk-budget concerns or who would rather route diagnostics
+    /// elsewhere; ytTUI's logger is best-effort, so dropping it loses
+    /// nothing the rest of the app relies on.
+    Off,
     Error,
     Warn,
     Info,
@@ -101,6 +106,7 @@ impl Default for LogLevel {
 impl From<LogLevel> for log::LevelFilter {
     fn from(level: LogLevel) -> Self {
         match level {
+            LogLevel::Off => Self::Off,
             LogLevel::Error => Self::Error,
             LogLevel::Warn => Self::Warn,
             LogLevel::Info => Self::Info,
@@ -271,6 +277,7 @@ mod tests {
     #[test]
     fn log_level_accepts_each_known_variant() {
         for (s, expected) in [
+            ("off", LogLevel::Off),
             ("error", LogLevel::Error),
             ("warn", LogLevel::Warn),
             ("info", LogLevel::Info),
@@ -299,6 +306,10 @@ mod tests {
     fn log_level_maps_to_log_crate_levelfilter() {
         // Sanity-check the From impl so a variant addition doesn't
         // silently drop a mapping.
+        assert_eq!(
+            log::LevelFilter::from(LogLevel::Off),
+            log::LevelFilter::Off
+        );
         assert_eq!(
             log::LevelFilter::from(LogLevel::Error),
             log::LevelFilter::Error
