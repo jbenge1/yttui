@@ -11,12 +11,18 @@ use crate::search::SearchResult;
 pub struct PlaybackOptions {
     pub audio_only: bool,
     /// Extra args appended to mpv's command line, sourced from
-    /// `[player] args` in the user config. Inserted *before* the URL
-    /// (which mpv treats as a positional file arg) so flags placed
-    /// here behave as expected. yttui-managed flags (`--no-video` for
-    /// audio-only) are emitted first; user args follow, letting mpv's
-    /// last-wins semantics apply if the user wants to override an
-    /// optional default.
+    /// `[player] args` in the user config. Order is: ytTUI-managed
+    /// flags (`--no-video` for audio-only), then these user args,
+    /// then the URL. The URL stays last because mpv treats it as a
+    /// positional file arg; flags after it would parse as additional
+    /// files.
+    ///
+    /// Because user args land *after* the managed flags, mpv's
+    /// last-wins resolution lets the user override a ytTUI default
+    /// of the same option — including audio-only mode (e.g.
+    /// `--video=auto` re-enables video despite `--audio-only`). That
+    /// is intentional, not a defect: this is the power-user knob.
+    /// See `PlayerConfig::args` for the user-facing contract.
     pub extra_args: Vec<String>,
 }
 

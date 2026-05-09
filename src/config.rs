@@ -55,13 +55,20 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct PlayerConfig {
-    /// Extra args appended to mpv after the args yttui itself manages
-    /// (audio-only, the URL, etc.). Empty by default — V1 behavior.
-    /// Args yttui needs for correctness (the URL, `--no-video` for
-    /// audio-only) are not user-overridable; user args are inserted
-    /// after them but before the URL, and mpv's last-wins semantics
-    /// let users tweak optional flags like `--no-osc` without breaking
-    /// playback.
+    /// Extra args appended to mpv's command line after ytTUI's managed
+    /// flags and before the URL. Empty by default — V1 behavior.
+    ///
+    /// **Override semantics.** mpv resolves option-vs-option conflicts
+    /// last-wins, so any flag here can override a ytTUI default of
+    /// the same option — including audio-only mode (e.g.
+    /// `args = ["--video=auto"]` re-enables video despite
+    /// `--audio-only` on the CLI). This is intentional: power-user
+    /// knob, power-user responsibility. The URL is the one exception
+    /// — it's a fixed positional file argument that user args cannot
+    /// displace.
+    ///
+    /// Useful example: `args = ["--save-position-on-quit"]` to have
+    /// mpv resume where you left off across launches.
     pub args: Vec<String>,
 }
 
