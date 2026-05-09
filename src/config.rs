@@ -56,7 +56,11 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct GeneralConfig {
-    /// Reserved. No runtime effect in A1.1.
+    /// Reserved. No runtime effect; load-bearing only for the
+    /// `partial_toml_only_overrides_specified_fields` test.
+    /// **Delete this field — and that test — when the first real
+    /// `[general]` field lands.** Until then it documents the
+    /// override contract for any field that follows.
     pub placeholder: bool,
 }
 

@@ -72,9 +72,20 @@ unwrap_used = "deny"
 #     only 0.2 (via `dirs → dirs-sys → redox_users`) is in the compile
 #     graph. 0.3/0.4 are pulled by unenabled `ratatui-termwiz` /
 #     `phf` edges.
-#   - `nix 0.29` is pulled by `ratatui-termwiz`; we pin our direct dep
-#     to `nix 0.27` (same major as `command-group`'s transitive use)
-#     so the compile graph has a single resolved version.
+#   - `nix 0.29` is pulled transitively via `ratatui-termwiz`; we pin
+#     our direct dep to `nix 0.27` (same major as `command-group`'s
+#     transitive use) so the compile graph has a single resolved
+#     version.
+#   - `winnow` ships two versions in the lockfile (0.7 and 1.0): both
+#     come from `toml 0.9`, which is mid-migration to `winnow 1.0`
+#     (its `toml_parser` sub-crate is on 1.0 while the top-level
+#     crate still pulls 0.7). Both are reachable from the binary.
+#     Tested 2026-05-09: pinning to `toml 0.8` removes this duplicate
+#     but introduces a `hashbrown 0.16/0.17` duplicate (via the
+#     `toml_edit`/`indexmap` chain) and pulls in the heavier
+#     edit-tree parser instead of the streaming one we use, so it's
+#     a net regression. Will resolve when toml finishes the winnow
+#     migration upstream. Tracked under #87.
 # Closing the lockfile gap entirely would require either a
 # `cargo-deny.toml` skip-list or `default-features = false` on
 # `ratatui` with explicit feature opt-in. Tracked as #77; deferred
