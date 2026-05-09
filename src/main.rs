@@ -46,7 +46,19 @@ fn main() {
     let _config = match yttui::config::Config::load_from_default_path() {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("config load failed, using defaults: {e}");
+            // Walk the source chain so the underlying io/toml detail
+            // shows up in the log; `ConfigError`'s Display intentionally
+            // doesn't embed `{source}` (see #84). A1.3 owns the proper
+            // user-facing error UX.
+            let mut msg = e.to_string();
+            let mut src: Option<&dyn std::error::Error> =
+                std::error::Error::source(&e);
+            while let Some(s) = src {
+                msg.push_str(": ");
+                msg.push_str(&s.to_string());
+                src = s.source();
+            }
+            log::warn!("config load failed, using defaults: {msg}");
             yttui::config::Config::default()
         }
     };

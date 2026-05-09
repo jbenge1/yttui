@@ -22,13 +22,17 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ConfigError {
-    #[error("reading config file {path}: {source}")]
+    // Display strings deliberately omit `{source}`; the underlying
+    // io/toml error is reachable via `Error::source()` and a chain
+    // walker (anyhow / hand-rolled) will format it once. Embedding it
+    // here would double-print under any future chain-walking caller.
+    #[error("reading config file {path}")]
     Io {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("parsing config file {path}: {source}")]
+    #[error("parsing config file {path}")]
     Parse {
         path: PathBuf,
         #[source]
@@ -175,6 +179,22 @@ mod tests {
         let path = write(&dir, "[general]\n");
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg, Config::default());
+    }
+
+    #[test]
+    fn directory_in_place_of_file_returns_io_error() {
+        // Pointing `load` at a directory exercises the catch-all
+        // `Err(source) => ConfigError::Io` arm — `read_to_string` on
+        // a directory yields `IsADirectory` / `Other` (platform-
+        // dependent), neither of which is `NotFound`.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::create_dir(&path).unwrap();
+        let err = Config::load(&path).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Io { .. }),
+            "expected Io, got {err:?}"
+        );
     }
 
     #[test]
