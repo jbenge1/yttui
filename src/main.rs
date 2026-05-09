@@ -38,6 +38,18 @@ fn main() {
         std::process::exit(2);
     }
     init_logger();
+    // A1.1: load config so the parse path is exercised on every run,
+    // but don't act on the values yet — V1 behavior is unchanged. Real
+    // wiring lands with the slices that own each section. Parse errors
+    // are warned to the log (init_logger ran above) and we proceed with
+    // defaults; user-facing error UX is A1.3.
+    let _config = match yttui::config::Config::load_from_default_path() {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("config load failed, using defaults: {e}");
+            yttui::config::Config::default()
+        }
+    };
     install_panic_hook();
     // Install the SIGINT/SIGTERM watcher *before* setup_terminal so a
     // Ctrl-C that races against startup still leaves a clean tty

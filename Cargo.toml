@@ -14,6 +14,11 @@ categories = ["command-line-utilities", "multimedia"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# A1.1: parse `$XDG_CONFIG_HOME/yttui/config.toml`. Roadmap names TOML
+# explicitly. We drop `display` (write-back is not on the V0.2 roadmap)
+# but keep `std` so `toml::de::Error` implements `std::error::Error`
+# for `thiserror`'s `#[source]`.
+toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
 thiserror = "2"
 command-group = "5"
 log = "0.4"
@@ -36,6 +41,7 @@ nix = { version = "0.27", default-features = false, features = ["signal"] }
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
+tempfile = "3"
 
 [profile.release]
 lto = true
