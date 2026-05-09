@@ -1,8 +1,13 @@
 //! Config loader (slice A1.1).
 //!
-//! Reads `$XDG_CONFIG_HOME/yttui/config.toml` into a typed [`Config`].
-//! Missing file or unspecified fields fall back to [`Config::default`],
-//! which by V0.2.0 contract reproduces V1 behavior exactly.
+//! Reads `$XDG_CONFIG_HOME/yttui/config.toml` (or
+//! `~/.config/yttui/config.toml` when `XDG_CONFIG_HOME` is unset) into a
+//! typed [`Config`]. Same shape on Linux and macOS — ytTUI is a CLI
+//! tool and follows the convention of other CLI tools (kitty, neovim,
+//! helix, starship, gh) rather than scattering into
+//! `~/Library/Application Support` on macOS. Missing file or
+//! unspecified fields fall back to [`Config::default`], which by
+//! V0.2.0 contract reproduces V1 behavior exactly.
 //!
 //! Real schema sections (`[history]`, `[log]`, `[playback]`, ...) are
 //! introduced by the slices that own them. A1.1 ships only the
@@ -85,14 +90,31 @@ impl Config {
         })
     }
 
-    /// Resolve the default config path under the platform's XDG config
-    /// dir (`$XDG_CONFIG_HOME/yttui/config.toml` on Linux, the macOS
-    /// equivalent via `dirs::config_dir`). Returns `None` if no such
-    /// directory is available — caller should treat that as
+    /// Resolve the default config path: `$XDG_CONFIG_HOME/yttui/config.toml`
+    /// when `XDG_CONFIG_HOME` is set, otherwise `~/.config/yttui/config.toml`.
+    /// Same shape on Linux and macOS, matching the convention used by
+    /// other CLI tools (kitty, neovim, helix, starship, gh).
+    /// Returns `None` only when neither `XDG_CONFIG_HOME` nor a home
+    /// directory can be resolved — caller should treat that as
     /// [`Config::default`].
     #[must_use]
     pub fn default_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|p| p.join("yttui").join("config.toml"))
+        Self::default_path_from(
+            std::env::var_os("XDG_CONFIG_HOME"),
+            dirs::home_dir(),
+        )
+    }
+
+    /// Pure resolver split out for testability: env mutation in tests
+    /// would require `unsafe`, which is forbidden crate-wide.
+    fn default_path_from(
+        xdg: Option<std::ffi::OsString>,
+        home: Option<PathBuf>,
+    ) -> Option<PathBuf> {
+        let base = xdg
+            .map(PathBuf::from)
+            .or_else(|| home.map(|h| h.join(".config")))?;
+        Some(base.join("yttui").join("config.toml"))
     }
 
     /// Convenience: load from [`Self::default_path`], falling back to
@@ -185,5 +207,37 @@ mod tests {
         if let Some(p) = Config::default_path() {
             assert!(p.ends_with("yttui/config.toml"), "got {p:?}");
         }
+    }
+
+    #[test]
+    fn default_path_honors_xdg_config_home_when_set() {
+        // XDG spec: when set, `$XDG_CONFIG_HOME` wins. Same on macOS
+        // and Linux. Tested via the pure helper to avoid mutating
+        // process env (which would also require `unsafe`).
+        let xdg = std::ffi::OsString::from("/tmp/some-xdg");
+        let home = Some(PathBuf::from("/home/user"));
+        let path = Config::default_path_from(Some(xdg), home).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/some-xdg/yttui/config.toml")
+        );
+    }
+
+    #[test]
+    fn default_path_falls_back_to_home_dot_config_when_xdg_unset() {
+        let path = Config::default_path_from(
+            None,
+            Some(PathBuf::from("/home/user")),
+        )
+        .unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from("/home/user/.config/yttui/config.toml")
+        );
+    }
+
+    #[test]
+    fn default_path_returns_none_when_neither_xdg_nor_home() {
+        assert!(Config::default_path_from(None, None).is_none());
     }
 }
