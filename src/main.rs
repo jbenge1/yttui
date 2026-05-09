@@ -37,31 +37,41 @@ fn main() {
         eprintln!("yttui: {e}");
         std::process::exit(2);
     }
-    init_logger();
-    // A1.1: load config so the parse path is exercised on every run.
-    // `[player] args` and `[log] level` are the user-tweakable knobs;
-    // remaining sections will be added by their owning slices. Parse
-    // errors are warned to the log (init_logger ran above) and we
-    // proceed with defaults; user-facing error UX is A1.3.
-    let config = match yttui::config::Config::load_from_default_path() {
-        Ok(c) => c,
-        Err(e) => {
-            // Walk the source chain so the underlying io/toml detail
-            // shows up in the log; `ConfigError`'s Display intentionally
-            // doesn't embed `{source}` (see #84). A1.3 owns the proper
-            // user-facing error UX.
-            let mut msg = e.to_string();
-            let mut src: Option<&dyn std::error::Error> =
-                std::error::Error::source(&e);
-            while let Some(s) = src {
-                msg.push_str(": ");
-                msg.push_str(&s.to_string());
-                src = s.source();
+    // Load config *before* logger init so the logger can honor
+    // `[log] level`. The wrinkle: a config-load failure still needs
+    // to be logged, but the logger isn't up yet — defer the warning
+    // to a String and emit it after `init_logger` has a sink. Stderr
+    // would corrupt the TUI once alt-screen is up; the deferred path
+    // keeps that one warning routed to the file like every other
+    // diagnostic.
+    let (config, deferred_load_warning) =
+        match yttui::config::Config::load_from_default_path() {
+            Ok(c) => (c, None),
+            Err(e) => {
+                // Walk the source chain so the underlying io/toml detail
+                // shows up in the log; `ConfigError`'s Display intentionally
+                // doesn't embed `{source}` (see #84). A1.3 owns the proper
+                // user-facing error UX.
+                let mut msg = e.to_string();
+                let mut src: Option<&dyn std::error::Error> =
+                    std::error::Error::source(&e);
+                while let Some(s) = src {
+                    msg.push_str(": ");
+                    msg.push_str(&s.to_string());
+                    src = s.source();
+                }
+                (
+                    yttui::config::Config::default(),
+                    Some(format!(
+                        "config load failed, using defaults: {msg}"
+                    )),
+                )
             }
-            log::warn!("config load failed, using defaults: {msg}");
-            yttui::config::Config::default()
-        }
-    };
+        };
+    init_logger(config.log.level.into());
+    if let Some(msg) = deferred_load_warning {
+        log::warn!("{msg}");
+    }
     install_panic_hook();
     // Install the SIGINT/SIGTERM watcher *before* setup_terminal so a
     // Ctrl-C that races against startup still leaves a clean tty
@@ -288,7 +298,11 @@ fn restore_terminal(terminal: &mut Term) -> io::Result<()> {
 /// one-line warning to stderr (terminal isn't in alt-screen yet, so
 /// stderr is safe here) and continue — `log::warn!` calls become
 /// no-ops in that case, but the TUI itself still works.
-fn init_logger() {
+///
+/// `level` is sourced from `[log] level` in the user config; the
+/// default matches the level previously hardcoded here, so V1
+/// behavior is unchanged unless the user opts in.
+fn init_logger(level: log::LevelFilter) {
     let Some(cache) = dirs::cache_dir() else {
         eprintln!(
             "yttui: warning: no cache directory available; logs disabled"
@@ -319,7 +333,7 @@ fn init_logger() {
         }
     };
     let _ = simplelog::WriteLogger::init(
-        log::LevelFilter::Warn,
+        level,
         simplelog::Config::default(),
         file,
     );

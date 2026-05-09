@@ -47,6 +47,7 @@ pub enum ConfigError {
 #[non_exhaustive]
 pub struct Config {
     pub player: PlayerConfig,
+    pub log: LogConfig,
 }
 
 /// `[player]` section. User-facing knobs for the mpv invocation.
@@ -62,6 +63,51 @@ pub struct PlayerConfig {
     /// let users tweak optional flags like `--no-osc` without breaking
     /// playback.
     pub args: Vec<String>,
+}
+
+/// `[log]` section.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct LogConfig {
+    pub level: LogLevel,
+}
+
+/// Log level, mirrored to [`log::LevelFilter`] at logger init time.
+///
+/// Owned here (rather than aliasing `LevelFilter`) so the TOML schema
+/// stays decoupled from the `log` crate's variant set — and so an
+/// invalid level yields a [`ConfigError::Parse`] with the standard
+/// "unknown variant" message instead of a stringly-typed match later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl Default for LogLevel {
+    /// Matches the level `init_logger` previously hardcoded; preserves
+    /// V1 behavior when the user does not set `[log] level`.
+    fn default() -> Self {
+        Self::Warn
+    }
+}
+
+impl From<LogLevel> for log::LevelFilter {
+    fn from(level: LogLevel) -> Self {
+        match level {
+            LogLevel::Error => Self::Error,
+            LogLevel::Warn => Self::Warn,
+            LogLevel::Info => Self::Info,
+            LogLevel::Debug => Self::Debug,
+            LogLevel::Trace => Self::Trace,
+        }
+    }
 }
 
 impl Config {
@@ -207,6 +253,71 @@ mod tests {
                 "--save-position-on-quit".to_string(),
                 "--no-osc".to_string(),
             ]
+        );
+    }
+
+    // ---- [log] level ----
+
+    #[test]
+    fn log_level_defaults_to_warn_when_section_absent() {
+        // Default must match the level previously hardcoded in
+        // `init_logger` — V1 behavior unchanged unless the user opts in.
+        let dir = TempDir::new().unwrap();
+        let path = write(&dir, "");
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.log.level, LogLevel::Warn);
+    }
+
+    #[test]
+    fn log_level_accepts_each_known_variant() {
+        for (s, expected) in [
+            ("error", LogLevel::Error),
+            ("warn", LogLevel::Warn),
+            ("info", LogLevel::Info),
+            ("debug", LogLevel::Debug),
+            ("trace", LogLevel::Trace),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let path = write(&dir, &format!("[log]\nlevel = \"{s}\"\n"));
+            let cfg = Config::load(&path).unwrap();
+            assert_eq!(cfg.log.level, expected, "input {s}");
+        }
+    }
+
+    #[test]
+    fn log_level_rejects_invalid_variant_with_typed_parse_error() {
+        let dir = TempDir::new().unwrap();
+        let path = write(&dir, "[log]\nlevel = \"wat\"\n");
+        let err = Config::load(&path).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Parse { .. }),
+            "expected Parse, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn log_level_maps_to_log_crate_levelfilter() {
+        // Sanity-check the From impl so a variant addition doesn't
+        // silently drop a mapping.
+        assert_eq!(
+            log::LevelFilter::from(LogLevel::Error),
+            log::LevelFilter::Error
+        );
+        assert_eq!(
+            log::LevelFilter::from(LogLevel::Warn),
+            log::LevelFilter::Warn
+        );
+        assert_eq!(
+            log::LevelFilter::from(LogLevel::Info),
+            log::LevelFilter::Info
+        );
+        assert_eq!(
+            log::LevelFilter::from(LogLevel::Debug),
+            log::LevelFilter::Debug
+        );
+        assert_eq!(
+            log::LevelFilter::from(LogLevel::Trace),
+            log::LevelFilter::Trace
         );
     }
 
