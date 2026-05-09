@@ -70,7 +70,10 @@ fn main() {
         };
     init_logger(config.log.level.into());
     if let Some(msg) = deferred_load_warning {
-        log::warn!("{msg}");
+        // `error!` not `warn!`: this is a config-system failure, and
+        // the user's `[log] level` shouldn't be able to censor a
+        // diagnostic about why their config was ignored. (See #88.)
+        log::error!("{msg}");
     }
     install_panic_hook();
     // Install the SIGINT/SIGTERM watcher *before* setup_terminal so a
