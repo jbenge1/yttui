@@ -10,9 +10,9 @@
 //! V0.2.0 contract reproduces V1 behavior exactly.
 //!
 //! Real schema sections (`[history]`, `[log]`, `[playback]`, ...) are
-//! introduced by the slices that own them. A1.1 ships only the
-//! load/parse/defaults plumbing plus a single placeholder field so the
-//! round-trip is exercised.
+//! introduced by the slices that own them. A1.1 ships the
+//! load/parse/defaults plumbing and the first real user-tweakable
+//! knobs: `[player] args` and `[log] level`.
 
 use std::path::{Path, PathBuf};
 
@@ -46,22 +46,22 @@ pub enum ConfigError {
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Config {
-    pub general: GeneralConfig,
+    pub player: PlayerConfig,
 }
 
-/// Placeholder section. Exists in A1.1 only to prove the TOML
-/// round-trip works end-to-end. Real fields will be added by their
-/// owning slices; do not extend this section opportunistically.
+/// `[player]` section. User-facing knobs for the mpv invocation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
-pub struct GeneralConfig {
-    /// Reserved. No runtime effect; load-bearing only for the
-    /// `partial_toml_only_overrides_specified_fields` test.
-    /// **Delete this field — and that test — when the first real
-    /// `[general]` field lands.** Until then it documents the
-    /// override contract for any field that follows.
-    pub placeholder: bool,
+pub struct PlayerConfig {
+    /// Extra args appended to mpv after the args yttui itself manages
+    /// (audio-only, the URL, etc.). Empty by default — V1 behavior.
+    /// Args yttui needs for correctness (the URL, `--no-video` for
+    /// audio-only) are not user-overridable; user args are inserted
+    /// after them but before the URL, and mpv's last-wins semantics
+    /// let users tweak optional flags like `--no-osc` without breaking
+    /// playback.
+    pub args: Vec<String>,
 }
 
 impl Config {
@@ -171,18 +171,43 @@ mod tests {
     fn partial_toml_only_overrides_specified_fields() {
         // Section present, field present: overrides default.
         let dir = TempDir::new().unwrap();
-        let path = write(&dir, "[general]\nplaceholder = true\n");
+        let path = write(&dir, "[player]\nargs = [\"--no-osc\"]\n");
         let cfg = Config::load(&path).unwrap();
-        assert!(cfg.general.placeholder);
+        assert_eq!(cfg.player.args, vec!["--no-osc".to_string()]);
     }
 
     #[test]
     fn partial_toml_with_empty_section_keeps_section_defaults() {
         // Section header present but no fields: section defaults apply.
         let dir = TempDir::new().unwrap();
-        let path = write(&dir, "[general]\n");
+        let path = write(&dir, "[player]\n");
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg, Config::default());
+    }
+
+    #[test]
+    fn player_args_defaults_to_empty_when_section_absent() {
+        let dir = TempDir::new().unwrap();
+        let path = write(&dir, "");
+        let cfg = Config::load(&path).unwrap();
+        assert!(cfg.player.args.is_empty());
+    }
+
+    #[test]
+    fn player_args_round_trips_a_non_empty_vec() {
+        let dir = TempDir::new().unwrap();
+        let path = write(
+            &dir,
+            "[player]\nargs = [\"--save-position-on-quit\", \"--no-osc\"]\n",
+        );
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(
+            cfg.player.args,
+            vec![
+                "--save-position-on-quit".to_string(),
+                "--no-osc".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -215,10 +240,9 @@ mod tests {
     #[test]
     fn unknown_field_is_rejected_so_typos_do_not_silently_no_op() {
         // `deny_unknown_fields` means user typos surface as parse
-        // errors instead of being silently ignored — important when
-        // real schema fields land in later slices.
+        // errors instead of being silently ignored.
         let dir = TempDir::new().unwrap();
-        let path = write(&dir, "[general]\nplacehlder = true\n");
+        let path = write(&dir, "[player]\nargz = []\n");
         let err = Config::load(&path).unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }));
     }

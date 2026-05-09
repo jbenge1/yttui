@@ -10,6 +10,14 @@ use crate::search::SearchResult;
 #[non_exhaustive]
 pub struct PlaybackOptions {
     pub audio_only: bool,
+    /// Extra args appended to mpv's command line, sourced from
+    /// `[player] args` in the user config. Inserted *before* the URL
+    /// (which mpv treats as a positional file arg) so flags placed
+    /// here behave as expected. yttui-managed flags (`--no-video` for
+    /// audio-only) are emitted first; user args follow, letting mpv's
+    /// last-wins semantics apply if the user wants to override an
+    /// optional default.
+    pub extra_args: Vec<String>,
 }
 
 impl PlaybackOptions {
@@ -19,6 +27,14 @@ impl PlaybackOptions {
     #[must_use]
     pub const fn with_audio_only(mut self, audio_only: bool) -> Self {
         self.audio_only = audio_only;
+        self
+    }
+
+    /// Builder shorthand for `extra_args`; pairs with
+    /// `with_audio_only` for `#[non_exhaustive]`-safe construction.
+    #[must_use]
+    pub fn with_extra_args(mut self, args: Vec<String>) -> Self {
+        self.extra_args = args;
         self
     }
 }
@@ -152,10 +168,15 @@ pub(crate) fn youtube_url(video_id: &str) -> String {
 
 #[must_use]
 pub(crate) fn mpv_args(video_id: &str, opts: &PlaybackOptions) -> Vec<String> {
-    let mut args = Vec::new();
+    let mut args = Vec::with_capacity(1 + opts.extra_args.len() + 1);
     if opts.audio_only {
         args.push("--no-video".to_string());
     }
+    // User-supplied args (from `[player] args`) appended before the
+    // URL. mpv treats the URL as a positional file arg, so anything
+    // after it would be parsed as additional files. Cloning is fine:
+    // this runs once per playback, not per frame.
+    args.extend(opts.extra_args.iter().cloned());
     args.push(youtube_url(video_id));
     args
 }
@@ -260,12 +281,44 @@ mod tests {
     fn audio_only_adds_no_video_flag() {
         let args = mpv_args(
             "abc123",
-            &PlaybackOptions {
-                audio_only: true,
-            },
+            &PlaybackOptions::default().with_audio_only(true),
         );
         assert_eq!(args[0], "--no-video");
         assert_eq!(args.last().unwrap(), &youtube_url("abc123"));
+    }
+
+    #[test]
+    fn extra_args_default_is_empty_so_default_invocation_is_unchanged() {
+        let opts = PlaybackOptions::default();
+        assert!(opts.extra_args.is_empty());
+    }
+
+    #[test]
+    fn extra_args_are_appended_before_the_url() {
+        let opts = PlaybackOptions::default()
+            .with_extra_args(vec!["--no-osc".to_string()]);
+        let args = mpv_args("abc123", &opts);
+        // URL still last (mpv treats it as a positional file arg);
+        // user flag must precede it.
+        assert_eq!(args.last().unwrap(), &youtube_url("abc123"));
+        let osc_pos = args.iter().position(|a| a == "--no-osc").unwrap();
+        let url_pos = args
+            .iter()
+            .position(|a| a.starts_with("https://"))
+            .unwrap();
+        assert!(osc_pos < url_pos, "user arg must precede URL: {args:?}");
+    }
+
+    #[test]
+    fn extra_args_compose_with_audio_only() {
+        let opts = PlaybackOptions::default()
+            .with_audio_only(true)
+            .with_extra_args(vec!["--save-position-on-quit".to_string()]);
+        let args = mpv_args("vid", &opts);
+        // Order: yttui-managed flags, user args, URL.
+        assert_eq!(args[0], "--no-video");
+        assert_eq!(args[1], "--save-position-on-quit");
+        assert_eq!(args[2], youtube_url("vid"));
     }
 
     #[test]
@@ -274,9 +327,7 @@ mod tests {
         // it get parsed as additional files.
         let args = mpv_args(
             "id",
-            &PlaybackOptions {
-                audio_only: true,
-            },
+            &PlaybackOptions::default().with_audio_only(true),
         );
         assert!(args.last().unwrap().starts_with("https://"));
     }
@@ -467,9 +518,7 @@ mod tests {
         play_result(
             &player,
             &r,
-            &PlaybackOptions {
-                audio_only: true,
-            },
+            &PlaybackOptions::default().with_audio_only(true),
         )
         .unwrap();
         let called = player.called_with.lock().unwrap().clone().unwrap();

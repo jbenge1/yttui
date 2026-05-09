@@ -38,12 +38,12 @@ fn main() {
         std::process::exit(2);
     }
     init_logger();
-    // A1.1: load config so the parse path is exercised on every run,
-    // but don't act on the values yet — V1 behavior is unchanged. Real
-    // wiring lands with the slices that own each section. Parse errors
-    // are warned to the log (init_logger ran above) and we proceed with
-    // defaults; user-facing error UX is A1.3.
-    let _config = match yttui::config::Config::load_from_default_path() {
+    // A1.1: load config so the parse path is exercised on every run.
+    // `[player] args` and `[log] level` are the user-tweakable knobs;
+    // remaining sections will be added by their owning slices. Parse
+    // errors are warned to the log (init_logger ran above) and we
+    // proceed with defaults; user-facing error UX is A1.3.
+    let config = match yttui::config::Config::load_from_default_path() {
         Ok(c) => c,
         Err(e) => {
             // Walk the source chain so the underlying io/toml detail
@@ -90,7 +90,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let run_result = run(&mut terminal, &cli);
+    let run_result = run(&mut terminal, &cli, &config);
     let restore_result = restore_terminal(&mut terminal);
 
     let final_err = run_result.err().or_else(|| restore_result.err());
@@ -100,10 +100,18 @@ fn main() {
     }
 }
 
-fn run(terminal: &mut Term, cli: &Cli) -> io::Result<()> {
+fn run(
+    terminal: &mut Term,
+    cli: &Cli,
+    config: &yttui::config::Config,
+) -> io::Result<()> {
     let dispatcher = SearchDispatcher::new(YtDlpBackend::default());
     let player = MpvPlayer::default();
-    let opts = PlaybackOptions::default().with_audio_only(cli.audio_only);
+    // Cloning the args vec once at startup; the `PlaybackOptions`
+    // value is reused for every play.
+    let opts = PlaybackOptions::default()
+        .with_audio_only(cli.audio_only)
+        .with_extra_args(config.player.args.clone());
 
     let mut app = App::new();
     let mut pending_search: Option<PendingSearch> = None;
