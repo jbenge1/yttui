@@ -85,15 +85,49 @@ ytdl-raw-options=write-subs=,write-auto-subs=,sub-lang="en"
 
 During playback: `j` / `J` cycle subtitle tracks, `v` toggles visibility.
 
+## Configuration
+
+`yttui` reads an optional TOML config from:
+
+- `$XDG_CONFIG_HOME/yttui/config.toml` if `$XDG_CONFIG_HOME` is set
+- otherwise `~/.config/yttui/config.toml` (Linux **and** macOS)
+
+A missing file is fine — defaults reproduce V1 behavior exactly.
+Malformed TOML is reported at `error` level (filter-immune) and
+`yttui` falls back to defaults so the TUI still launches.
+
+Two knobs are wired up in 0.1.2:
+
+- `[player] args` — extra args appended to the `mpv` invocation,
+  after ytTUI's managed flags and before the URL. mpv resolves
+  conflicting options last-wins, so anything here can override a
+  ytTUI default of the same option — including audio-only mode (pass
+  `--video=auto` to defeat `--audio-only`). The URL position is
+  fixed; user args cannot displace it.
+- `[log] level` — one of `off | error | warn | info | debug | trace`.
+  Default `warn`. Maps directly to `log::LevelFilter`.
+
+Example:
+
+```toml
+[player]
+args = ["--save-position-on-quit", "--no-osc"]
+
+[log]
+level = "info"
+```
+
+Not yet supported in 0.1.2: a `--config` flag, env-var overrides, and
+CLI/config precedence merging. Only the on-disk file loads today;
+those layers land in A1.2.
+
 ## Files
 
 | Path | What |
 |---|---|
-| `~/Library/Caches/yttui/yttui.log` (macOS) | warning-level log |
-| `~/.cache/yttui/yttui.log` (Linux/XDG) | warning-level log |
-
-No config file in V1. V2 will land one at
-`$XDG_CONFIG_HOME/yttui/config.toml`.
+| `$XDG_CONFIG_HOME/yttui/config.toml` or `~/.config/yttui/config.toml` | optional TOML config (see above) |
+| `~/Library/Caches/yttui/yttui.log` (macOS) | log file (level configurable) |
+| `~/.cache/yttui/yttui.log` (Linux/XDG) | log file (level configurable) |
 
 ## macOS launch caveat
 
@@ -142,8 +176,8 @@ limitation, not something `yttui` can fix.
 ## Privacy
 
 All state is local — no telemetry, no cloud sync. `yt-dlp` talks to
-YouTube directly from your IP. Logs (warning-level only) live in your
-platform cache dir; safe to delete.
+YouTube directly from your IP. Logs (level configurable, `warn` by
+default) live in your platform cache dir; safe to delete.
 
 ## Status
 
