@@ -466,7 +466,22 @@ mod tests {
 
     /// Scan the buffer row-by-row for `needle`; return the (fg, bg) of
     /// the cell holding the *first* character of the match.
-    fn find_substring_cell(buf: &Buffer, needle: &str) -> Option<(Color, Color)> {
+    ///
+    /// ASCII-only by contract: the helper aligns `String::find`'s
+    /// byte index against a per-cell `symbol().len()` byte counter,
+    /// which is only sound when every cell is single-byte. A non-ASCII
+    /// needle would silently mislocate; we `debug_assert!` to surface
+    /// the misuse loudly in dev builds. The buffer rows themselves
+    /// may contain non-ASCII (e.g. wide-char title fixtures), since
+    /// ratatui's `TestBackend` lays wide chars out as glyph-cell +
+    /// trailing-space-cell, keeping per-row byte indices stable
+    /// against cell-by-cell byte accumulation. The fragile pin is on
+    /// the *needle*, not the row.
+    fn find_ascii_cell(buf: &Buffer, needle: &str) -> Option<(Color, Color)> {
+        debug_assert!(
+            needle.is_ascii(),
+            "find_ascii_cell needs an ASCII needle; got {needle:?}"
+        );
         let area = buf.area();
         for y in 0..area.height {
             let mut row = String::new();
@@ -474,11 +489,6 @@ mod tests {
                 row.push_str(buf[(x, y)].symbol());
             }
             if let Some(byte_idx) = row.find(needle) {
-                // Walk the row again counting display cells until we
-                // reach the cell that starts at `byte_idx`. Symbols may
-                // be multi-byte (e.g. CJK) but our test fixtures use
-                // ASCII channel names so a 1-cell-per-symbol scan with
-                // a byte counter is sufficient.
                 let mut byte_pos = 0usize;
                 for x in 0..area.width {
                     let cell = &buf[(x, y)];
@@ -507,7 +517,7 @@ mod tests {
         app.selected = 0;
 
         let buf = render_to_buffer(&mut app, &palette, 80, 24);
-        let (fg, bg) = find_substring_cell(&buf, "Alice")
+        let (fg, bg) = find_ascii_cell(&buf, "Alice")
             .expect("channel name should render on selected row");
         assert_eq!(
             bg, palette.selection_bg,
@@ -534,7 +544,7 @@ mod tests {
         app.selected = 0;
 
         let buf = render_to_buffer(&mut app, &palette, 80, 24);
-        let (fg, bg) = find_substring_cell(&buf, "1:00")
+        let (fg, bg) = find_ascii_cell(&buf, "1:00")
             .expect("duration should render on selected row");
         assert_eq!(
             bg, palette.selection_bg,
@@ -543,6 +553,31 @@ mod tests {
         assert_ne!(
             fg, palette.selection_bg,
             "duration fg must not equal selection bg or text disappears"
+        );
+    }
+
+    #[test]
+    fn find_ascii_cell_locates_channel_when_row_contains_cjk() {
+        // Pins the helper's contract: an ASCII needle stays locatable
+        // even when the row in front of it contains CJK glyphs.
+        // ratatui's TestBackend renders wide chars as glyph + trailing
+        // space, so the per-cell byte counter stays in sync with
+        // String::find's byte index across mixed-width rows. If a
+        // future ratatui version changes that layout, this test catches
+        // it before the channel/duration palette tests start lying.
+        let mut app = results_app_with(&[("a", "あいうTitle", "ChanName")]);
+        app.selected = 0;
+        let palette = Palette {
+            channel_fg: Color::Magenta,
+            ..Palette::default()
+        };
+        let buf = render_to_buffer(&mut app, &palette, 80, 24);
+        let (fg, _) = find_ascii_cell(&buf, "ChanName")
+            .expect("ChanName substring should be locatable");
+        assert_eq!(
+            fg,
+            Color::Magenta,
+            "helper must land on the channel cell, not the pad before it"
         );
     }
 
@@ -564,9 +599,9 @@ mod tests {
         };
         let buf1 = render_to_buffer(&mut app, &p1, 80, 24);
         let buf2 = render_to_buffer(&mut app, &p2, 80, 24);
-        let (fg1, _) = find_substring_cell(&buf1, "ChanName")
+        let (fg1, _) = find_ascii_cell(&buf1, "ChanName")
             .expect("channel cell present in buf1");
-        let (fg2, _) = find_substring_cell(&buf2, "ChanName")
+        let (fg2, _) = find_ascii_cell(&buf2, "ChanName")
             .expect("channel cell present in buf2");
         assert_eq!(fg1, Color::Magenta);
         assert_eq!(fg2, Color::Green);
