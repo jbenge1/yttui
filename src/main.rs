@@ -127,6 +127,9 @@ fn run(
         .with_extra_args(config.player.args.clone());
 
     let mut app = App::new();
+    // Themes config doesn't land until V0.2.x; until then the default
+    // palette stands in for what will become a user-themable value.
+    let palette = yttui::palette::Palette::default();
     let mut pending_search: Option<PendingSearch> = None;
 
     // If we got an initial query on the CLI, fire it immediately.
@@ -139,7 +142,7 @@ fn run(
     }
 
     loop {
-        terminal.draw(|frame| yttui::tui::draw(frame, &mut app))?;
+        terminal.draw(|frame| yttui::tui::draw(frame, &mut app, &palette))?;
 
         // Drain any completed search before polling input. The
         // dispatcher owns the Disconnected→WorkerPanicked mapping

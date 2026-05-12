@@ -5,7 +5,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, List, ListItem, ListState, Paragraph, Wrap,
@@ -13,6 +13,7 @@ use ratatui::widgets::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, LastError, Screen};
+use crate::palette::Palette;
 use crate::search::{SearchResult, VideoDuration};
 
 /// Minimum supported terminal dimensions (per V1 spec). Below this, we
@@ -20,10 +21,10 @@ use crate::search::{SearchResult, VideoDuration};
 const MIN_WIDTH: u16 = 60;
 const MIN_HEIGHT: u16 = 20;
 
-pub fn draw(frame: &mut Frame, app: &mut App) {
+pub fn draw(frame: &mut Frame, app: &mut App, palette: &Palette) {
     let area = frame.area();
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
-        draw_too_small(frame, area);
+        draw_too_small(frame, area, palette);
         return;
     }
 
@@ -36,26 +37,26 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ])
         .split(area);
 
-    draw_header(frame, layout[0], app);
-    draw_body(frame, layout[1], app);
-    draw_footer(frame, layout[2], app);
+    draw_header(frame, layout[0], app, palette);
+    draw_body(frame, layout[1], app, palette);
+    draw_footer(frame, layout[2], app, palette);
 
     if app.screen == Screen::Help {
-        draw_help_overlay(frame, area);
+        draw_help_overlay(frame, area, palette);
     }
 }
 
-fn draw_too_small(frame: &mut Frame, area: Rect) {
+fn draw_too_small(frame: &mut Frame, area: Rect, palette: &Palette) {
     let p = Paragraph::new(format!(
         "Terminal too small (need at least {MIN_WIDTH}×{MIN_HEIGHT}).\n\
          Resize and try again, or press q to quit."
     ))
-    .style(Style::default().fg(Color::Yellow))
+    .style(Style::default().fg(palette.warning_fg))
     .wrap(Wrap { trim: false });
     frame.render_widget(p, area);
 }
 
-fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_header(frame: &mut Frame, area: Rect, app: &App, palette: &Palette) {
     let title = match app.screen {
         Screen::Prompt => " yttui — search ".to_string(),
         Screen::Searching => format!(
@@ -74,9 +75,9 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 
     let body: Line = match &app.screen {
         Screen::Prompt => Line::from(vec![
-            Span::styled("yt> ", Style::default().fg(Color::Cyan)),
+            Span::styled("yt> ", Style::default().fg(palette.prompt_marker_fg)),
             Span::raw(&app.input),
-            Span::styled("│", Style::default().fg(Color::DarkGray)),
+            Span::styled("│", Style::default().fg(palette.cursor_fg)),
         ]),
         Screen::Searching => Line::from(vec![Span::styled(
             "Searching… (Esc to cancel)",
@@ -86,15 +87,18 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             || Line::from(""),
             |q| {
                 Line::from(vec![
-                    Span::styled("yt> ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        "yt> ",
+                        Style::default().fg(palette.prompt_marker_inactive_fg),
+                    ),
                     Span::raw(q.as_str()),
                 ])
             },
         ),
         Screen::Filter => Line::from(vec![
-            Span::styled("/", Style::default().fg(Color::Yellow)),
+            Span::styled("/", Style::default().fg(palette.filter_marker_fg)),
             Span::raw(&app.input),
-            Span::styled("│", Style::default().fg(Color::DarkGray)),
+            Span::styled("│", Style::default().fg(palette.cursor_fg)),
         ]),
     };
 
@@ -103,7 +107,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(body), inner);
 }
 
-fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
+fn draw_body(frame: &mut Frame, area: Rect, app: &mut App, palette: &Palette) {
     // The body block is the single source of truth for inner dimensions.
     // Whatever its `inner` returns is exactly the rect the sub-drawers
     // paint into AND what the state machine uses to size half-page jumps.
@@ -114,21 +118,21 @@ fn draw_body(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_widget(block, area);
 
     match app.screen {
-        Screen::Prompt => draw_prompt_body(frame, inner, app),
-        Screen::Searching => draw_searching_body(frame, inner, app),
+        Screen::Prompt => draw_prompt_body(frame, inner, app, palette),
+        Screen::Searching => draw_searching_body(frame, inner, app, palette),
         Screen::Results | Screen::Filter | Screen::Help => {
-            draw_results_body(frame, inner, app);
+            draw_results_body(frame, inner, app, palette);
         }
     }
 }
 
-fn draw_prompt_body(frame: &mut Frame, inner: Rect, _app: &App) {
+fn draw_prompt_body(frame: &mut Frame, inner: Rect, _app: &App, palette: &Palette) {
     // Inline help on the Prompt body — "?" is a legal query character so
     // we don't reserve it as a hotkey here. Modal help is still available
     // on Results.
     let dim = Style::default().add_modifier(Modifier::DIM);
     let key = Style::default()
-        .fg(Color::Cyan)
+        .fg(palette.keycap_fg)
         .add_modifier(Modifier::BOLD);
 
     let mut lines: Vec<Line> = vec![
@@ -158,13 +162,13 @@ fn draw_prompt_body(frame: &mut Frame, inner: Rect, _app: &App) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_searching_body(frame: &mut Frame, inner: Rect, app: &App) {
+fn draw_searching_body(frame: &mut Frame, inner: Rect, app: &App, palette: &Palette) {
     let q = app.committed_query.as_deref().unwrap_or("");
     let lines = vec![
         Line::from(""),
         Line::from(Span::styled(
             format!("yt-dlp ytsearch:{q}…"),
-            Style::default().fg(Color::Cyan),
+            Style::default().fg(palette.prompt_marker_fg),
         )),
         Line::from(""),
         Line::from(Span::styled(
@@ -175,7 +179,7 @@ fn draw_searching_body(frame: &mut Frame, inner: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn draw_results_body(frame: &mut Frame, inner: Rect, app: &App) {
+fn draw_results_body(frame: &mut Frame, inner: Rect, app: &App, palette: &Palette) {
     if app.results.is_empty() {
         let p = Paragraph::new(Line::from(Span::styled(
             "No results.",
@@ -187,7 +191,7 @@ fn draw_results_body(frame: &mut Frame, inner: Rect, app: &App) {
     if app.filtered.is_empty() {
         let p = Paragraph::new(Line::from(Span::styled(
             format!("No matches for {:?}.", app.input),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(palette.warning_fg),
         )));
         frame.render_widget(p, inner);
         return;
@@ -197,13 +201,13 @@ fn draw_results_body(frame: &mut Frame, inner: Rect, app: &App) {
         .filtered
         .iter()
         .filter_map(|i| app.results.get(*i))
-        .map(|r| render_row(r, inner.width))
+        .map(|r| render_row(r, inner.width, palette))
         .collect();
 
     let list = List::new(items)
         .highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
+                .bg(palette.selection_bg)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");
@@ -238,7 +242,7 @@ fn format_duration(d: &VideoDuration) -> String {
 
 /// Render one result row as `<title>     <channel>   <duration>` with the
 /// duration right-aligned. Truncates wide content based on terminal width.
-fn render_row(r: &SearchResult, width: u16) -> ListItem<'static> {
+fn render_row(r: &SearchResult, width: u16, palette: &Palette) -> ListItem<'static> {
     // Reserve columns for selection symbol (2) + duration (8) + spacers.
     let dur = format_duration(&r.duration);
     let dur_w = u16::try_from(dur.width()).unwrap_or(u16::MAX);
@@ -260,12 +264,12 @@ fn render_row(r: &SearchResult, width: u16) -> ListItem<'static> {
     let line = Line::from(vec![
         Span::raw(title),
         Span::raw(" ".repeat(usize::from(title_pad) + 1)),
-        Span::styled(chan, Style::default().fg(Color::DarkGray)),
+        Span::styled(chan, Style::default().fg(palette.channel_fg)),
         Span::raw(" ".repeat(usize::from(chan_pad) + 1)),
         Span::styled(
             dur,
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(palette.duration_fg)
                 .add_modifier(Modifier::DIM),
         ),
     ]);
@@ -324,9 +328,9 @@ fn greedy_prefix(s: &str, max_cols: usize) -> String {
     out
 }
 
-fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_footer(frame: &mut Frame, area: Rect, app: &App, palette: &Palette) {
     let line = app.last_error.as_ref().map_or_else(
-        || hints_line_for(&app.screen),
+        || hints_line_for(&app.screen, palette),
         |err| {
             let icon = match err {
                 LastError::Search(_) => "search error: ",
@@ -335,16 +339,18 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Line::from(vec![
                 Span::styled(
                     icon,
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(palette.error_fg)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(err.message(), Style::default().fg(Color::Red)),
+                Span::styled(err.message(), Style::default().fg(palette.error_fg)),
             ])
         },
     );
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn hints_line_for(screen: &Screen) -> Line<'static> {
+fn hints_line_for(screen: &Screen, palette: &Palette) -> Line<'static> {
     let hints = match screen {
         Screen::Prompt => "Enter  search    Esc / Ctrl-C  quit",
         Screen::Searching => "Esc  cancel",
@@ -357,12 +363,12 @@ fn hints_line_for(screen: &Screen) -> Line<'static> {
     Line::from(Span::styled(
         hints,
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(palette.hint_fg)
             .add_modifier(Modifier::DIM),
     ))
 }
 
-fn draw_help_overlay(frame: &mut Frame, area: Rect) {
+fn draw_help_overlay(frame: &mut Frame, area: Rect, palette: &Palette) {
     // Centered popup, ~60% of width and height.
     let popup = centered_rect(60, 60, area);
     let block = Block::default()
@@ -391,7 +397,7 @@ fn draw_help_overlay(frame: &mut Frame, area: Rect) {
             Span::styled(
                 format!("{k:<18}"),
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(palette.keycap_fg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(*d),
@@ -425,6 +431,119 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
+
+    fn results_app_with(rows: &[(&str, &str, &str)]) -> App {
+        // (id, title, channel) — duration is set to a known value so
+        // tests don't depend on duration column width subtleties.
+        let mut app = App::new();
+        app.results = rows
+            .iter()
+            .map(|(id, title, ch)| SearchResult {
+                id: (*id).to_string(),
+                title: (*title).to_string(),
+                channel: Some((*ch).to_string()),
+                duration: VideoDuration::Seconds(60),
+            })
+            .collect();
+        app.committed_query = Some("q".to_string());
+        app.recompute_filter();
+        app.screen = Screen::Results;
+        app
+    }
+
+    fn render_to_buffer(app: &mut App, palette: &Palette, w: u16, h: u16) -> Buffer {
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|f| draw(f, app, palette))
+            .expect("draw to test backend");
+        terminal.backend().buffer().clone()
+    }
+
+    /// Scan the buffer row-by-row for `needle`; return the (fg, bg) of
+    /// the cell holding the *first* character of the match.
+    fn find_substring_cell(buf: &Buffer, needle: &str) -> Option<(Color, Color)> {
+        let area = buf.area();
+        for y in 0..area.height {
+            let mut row = String::new();
+            for x in 0..area.width {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            if let Some(byte_idx) = row.find(needle) {
+                // Walk the row again counting display cells until we
+                // reach the cell that starts at `byte_idx`. Symbols may
+                // be multi-byte (e.g. CJK) but our test fixtures use
+                // ASCII channel names so a 1-cell-per-symbol scan with
+                // a byte counter is sufficient.
+                let mut byte_pos = 0usize;
+                for x in 0..area.width {
+                    let cell = &buf[(x, y)];
+                    if byte_pos == byte_idx {
+                        return Some((cell.fg, cell.bg));
+                    }
+                    byte_pos += cell.symbol().len();
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn channel_fg_does_not_collide_with_selection_bg_on_selected_row() {
+        // The bug: V1 hardcoded both selection bg and channel fg to
+        // Color::DarkGray, so the channel column disappeared when its
+        // row was the selected one. This test renders a real frame and
+        // asserts the channel-name cell on the selected row carries an
+        // fg distinct from the selection bg.
+        let palette = Palette::default();
+        let mut app = results_app_with(&[
+            ("a", "First video", "AliceChannel"),
+            ("b", "Second clip", "BobChannel"),
+        ]);
+        app.selected = 0;
+
+        let buf = render_to_buffer(&mut app, &palette, 80, 24);
+        let (fg, bg) = find_substring_cell(&buf, "Alice")
+            .expect("channel name should render on selected row");
+        assert_eq!(
+            bg, palette.selection_bg,
+            "selected row should carry the selection bg"
+        );
+        assert_ne!(
+            fg, palette.selection_bg,
+            "channel fg must not equal selection bg or text disappears"
+        );
+    }
+
+    #[test]
+    fn results_body_reads_channel_color_from_palette_not_a_literal() {
+        // Indirect proof that the renderer goes through the palette
+        // rather than a Color::* literal: swap the palette's channel
+        // color and the buffer cell color follows.
+        let mut app = results_app_with(&[("a", "Title", "ChanName")]);
+        app.selected = 0;
+
+        let p1 = Palette {
+            channel_fg: Color::Magenta,
+            ..Palette::default()
+        };
+        let p2 = Palette {
+            channel_fg: Color::Green,
+            ..Palette::default()
+        };
+        let buf1 = render_to_buffer(&mut app, &p1, 80, 24);
+        let buf2 = render_to_buffer(&mut app, &p2, 80, 24);
+        let (fg1, _) = find_substring_cell(&buf1, "ChanName")
+            .expect("channel cell present in buf1");
+        let (fg2, _) = find_substring_cell(&buf2, "ChanName")
+            .expect("channel cell present in buf2");
+        assert_eq!(fg1, Color::Magenta);
+        assert_eq!(fg2, Color::Green);
+    }
 
     #[test]
     fn format_duration_renders_each_variant() {
