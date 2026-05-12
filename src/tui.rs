@@ -168,7 +168,7 @@ fn draw_searching_body(frame: &mut Frame, inner: Rect, app: &App, palette: &Pale
         Line::from(""),
         Line::from(Span::styled(
             format!("yt-dlp ytsearch:{q}…"),
-            Style::default().fg(palette.prompt_marker_fg),
+            Style::default().fg(palette.progress_fg),
         )),
         Line::from(""),
         Line::from(Span::styled(
@@ -436,6 +436,13 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::style::Color;
 
+    fn searching_app(query: &str) -> App {
+        let mut app = App::new();
+        app.committed_query = Some(query.to_string());
+        app.screen = Screen::Searching;
+        app
+    }
+
     fn results_app_with(rows: &[(&str, &str, &str)]) -> App {
         // (id, title, channel) — duration is set to a known value so
         // tests don't depend on duration column width subtleties.
@@ -554,6 +561,34 @@ mod tests {
             fg, palette.selection_bg,
             "duration fg must not equal selection bg or text disappears"
         );
+    }
+
+    #[test]
+    fn searching_status_follows_progress_fg_not_prompt_marker_fg() {
+        // The "yt-dlp ytsearch:…" status line used to share
+        // prompt_marker_fg with the active prompt; split into
+        // progress_fg so Themes 1 users can recolor independently.
+        // Buffer-diff proof: hold prompt_marker_fg constant and swap
+        // only progress_fg — the status cell color must follow.
+        let mut app = searching_app("hello");
+        let p1 = Palette {
+            prompt_marker_fg: Color::Cyan,
+            progress_fg: Color::Magenta,
+            ..Palette::default()
+        };
+        let p2 = Palette {
+            prompt_marker_fg: Color::Cyan,
+            progress_fg: Color::Green,
+            ..Palette::default()
+        };
+        let buf1 = render_to_buffer(&mut app, &p1, 80, 24);
+        let buf2 = render_to_buffer(&mut app, &p2, 80, 24);
+        let (fg1, _) = find_ascii_cell(&buf1, "yt-dlp ytsearch:hello")
+            .expect("status line present in buf1");
+        let (fg2, _) = find_ascii_cell(&buf2, "yt-dlp ytsearch:hello")
+            .expect("status line present in buf2");
+        assert_eq!(fg1, Color::Magenta);
+        assert_eq!(fg2, Color::Green);
     }
 
     #[test]

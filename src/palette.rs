@@ -39,9 +39,15 @@ pub struct Palette {
     pub duration_fg: Color,
     /// Foreground for inline error icons + messages in the footer.
     pub error_fg: Color,
-    /// Foreground for the active `yt>` prompt marker and the
-    /// "yt-dlp ytsearch:…" searching status line.
+    /// Foreground for the active `yt>` prompt marker.
     pub prompt_marker_fg: Color,
+    /// Foreground for in-progress status lines (currently the
+    /// "yt-dlp ytsearch:…" indicator on the Searching screen, and any
+    /// future loading/progress indicators). Split out of
+    /// `prompt_marker_fg` in Review 27 fix-up so themes can recolor
+    /// the two roles independently — keep it separate; don't merge
+    /// back even if both default to the same color.
+    pub progress_fg: Color,
     /// Foreground for the `yt>` echo of the committed query while on
     /// the Results screen (i.e. the inactive form).
     pub prompt_marker_inactive_fg: Color,
@@ -70,6 +76,11 @@ impl Default for Palette {
             duration_fg: Color::Gray,
             error_fg: Color::Red,
             prompt_marker_fg: Color::Cyan,
+            // Same default as prompt_marker_fg — V1 absorbed this
+            // consumer into the prompt marker slot. Kept identical so
+            // V1 appearance is byte-equivalent; structurally separate
+            // so Themes 1 can split them.
+            progress_fg: Color::Cyan,
             prompt_marker_inactive_fg: Color::DarkGray,
             cursor_fg: Color::DarkGray,
             keycap_fg: Color::Cyan,
@@ -101,6 +112,7 @@ mod tests {
         assert_eq!(p.duration_fg, Color::Gray);
         assert_eq!(p.error_fg, Color::Red);
         assert_eq!(p.prompt_marker_fg, Color::Cyan);
+        assert_eq!(p.progress_fg, Color::Cyan);
         assert_eq!(p.prompt_marker_inactive_fg, Color::DarkGray);
         assert_eq!(p.cursor_fg, Color::DarkGray);
         assert_eq!(p.keycap_fg, Color::Cyan);
