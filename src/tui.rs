@@ -520,6 +520,33 @@ mod tests {
     }
 
     #[test]
+    fn duration_fg_does_not_collide_with_selection_bg_on_selected_row() {
+        // Same bug shape as the channel collision: V1 defaulted both
+        // selection_bg and duration_fg to Color::DarkGray, so the
+        // duration cell vanished on the highlighted row. Pinned with
+        // a real frame render — durations are formatted as "M:SS"
+        // (e.g. "1:00"), so we search for that substring.
+        let palette = Palette::default();
+        let mut app = results_app_with(&[
+            ("a", "First video", "AliceChannel"),
+            ("b", "Second clip", "BobChannel"),
+        ]);
+        app.selected = 0;
+
+        let buf = render_to_buffer(&mut app, &palette, 80, 24);
+        let (fg, bg) = find_substring_cell(&buf, "1:00")
+            .expect("duration should render on selected row");
+        assert_eq!(
+            bg, palette.selection_bg,
+            "selected row should carry the selection bg"
+        );
+        assert_ne!(
+            fg, palette.selection_bg,
+            "duration fg must not equal selection bg or text disappears"
+        );
+    }
+
+    #[test]
     fn results_body_reads_channel_color_from_palette_not_a_literal() {
         // Indirect proof that the renderer goes through the palette
         // rather than a Color::* literal: swap the palette's channel

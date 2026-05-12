@@ -9,12 +9,14 @@
 //!
 //! ## V1 byte-equivalence
 //!
-//! [`Palette::default`] reproduces V1 colors exactly with **one
-//! deliberate exception**: `channel_fg` was `Color::DarkGray` in V1,
-//! which collided with `selection_bg` (also `DarkGray`) — the channel
-//! name disappeared into the selection bar on the highlighted row.
-//! `channel_fg` now defaults to `Color::Blue` so the row stays
-//! readable when selected. All other fields are V1-identical.
+//! [`Palette::default`] reproduces V1 colors exactly with **two
+//! deliberate exceptions**, both fixing the same selection-bar
+//! collision bug: in V1 `channel_fg` and `duration_fg` both defaulted
+//! to `Color::DarkGray`, which is also `selection_bg` — so the
+//! channel name and the duration both vanished into the selection bar
+//! on the highlighted row. `channel_fg` now defaults to `Color::Blue`
+//! and `duration_fg` to `Color::Gray` so the row stays readable when
+//! selected. All other fields are V1-identical.
 
 use ratatui::style::Color;
 
@@ -31,7 +33,9 @@ pub struct Palette {
     /// uses `Blue` to keep the channel name visible on the selected
     /// row.
     pub channel_fg: Color,
-    /// Foreground for the duration column in result rows.
+    /// Foreground for the duration column in result rows. V1 used
+    /// `DarkGray`, which collided with `selection_bg`; the default now
+    /// uses `Gray` to keep the duration visible on the selected row.
     pub duration_fg: Color,
     /// Foreground for inline error icons + messages in the footer.
     pub error_fg: Color,
@@ -59,10 +63,11 @@ impl Default for Palette {
     fn default() -> Self {
         Self {
             selection_bg: Color::DarkGray,
-            // V1 was Color::DarkGray; intentionally changed — see
-            // module docstring for the why.
+            // channel_fg and duration_fg both deviate from V1's
+            // Color::DarkGray to avoid the selection-bar collision —
+            // see module docstring for the why.
             channel_fg: Color::Blue,
-            duration_fg: Color::DarkGray,
+            duration_fg: Color::Gray,
             error_fg: Color::Red,
             prompt_marker_fg: Color::Cyan,
             prompt_marker_inactive_fg: Color::DarkGray,
@@ -81,15 +86,19 @@ mod tests {
     use ratatui::style::Color;
 
     #[test]
-    fn default_palette_matches_v1_colors_except_channel_fg() {
-        // V1 hardcoded values, asserted field-by-field. The single
-        // intentional drift is channel_fg — see the module docstring.
+    fn default_palette_matches_v1_colors_except_selection_collisions() {
+        // V1 hardcoded values, asserted field-by-field. Two
+        // intentional drifts — channel_fg and duration_fg — both
+        // fixing the same selection-bar collision. See module
+        // docstring.
         let p = Palette::default();
         assert_eq!(p.selection_bg, Color::DarkGray);
         // channel_fg was Color::DarkGray in V1; changed to Color::Blue
         // to fix the collision with selection_bg on the highlighted row.
         assert_eq!(p.channel_fg, Color::Blue);
-        assert_eq!(p.duration_fg, Color::DarkGray);
+        // duration_fg was Color::DarkGray in V1; changed to Color::Gray
+        // for the same reason.
+        assert_eq!(p.duration_fg, Color::Gray);
         assert_eq!(p.error_fg, Color::Red);
         assert_eq!(p.prompt_marker_fg, Color::Cyan);
         assert_eq!(p.prompt_marker_inactive_fg, Color::DarkGray);
@@ -102,19 +111,13 @@ mod tests {
 
     #[test]
     fn default_palette_has_no_selection_collisions() {
-        // The bug this slice fixes: a row's foreground colors must not
-        // equal the selection background, or text vanishes when the row
-        // is highlighted. Channel was the smoking gun; pin every fg
-        // that renders inside a selectable row.
+        // A row's foreground colors must not equal the selection
+        // background, or text vanishes when the row is highlighted.
+        // The behavior-pinning regression lives in tui::tests; this
+        // is the fast sanity check on the constants.
         let p = Palette::default();
         assert_ne!(p.channel_fg, p.selection_bg);
-        // Duration's fg currently *does* equal selection_bg (DarkGray),
-        // but it also carries Modifier::DIM and renders inside the
-        // selection bar where the row's BOLD modifier on the highlight
-        // style flips it visible. The collision check here is scoped
-        // to channel_fg, which is the field this slice changes. If a
-        // future change makes duration suffer the same fate, add the
-        // assertion then with the matching fix.
+        assert_ne!(p.duration_fg, p.selection_bg);
         assert_ne!(p.error_fg, p.selection_bg);
     }
 
